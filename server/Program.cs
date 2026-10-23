@@ -249,6 +249,21 @@ app.MapPost("/api/events", async (
     return Results.NoContent();
 }).RequireAuthorization();
 
+app.MapPost("/api/events/delete", async (
+    HttpContext context,
+    ClaimsPrincipal user,
+    GoogleCalendarApi calendarApi,
+    GoogleEventDeleteRequest request) =>
+{
+    if (!Uri.TryCreate(context.Request.Headers.Origin, UriKind.Absolute, out var origin)
+        || !string.Equals(origin.GetLeftPart(UriPartial.Authority), oauth.FrontendOrigin, StringComparison.OrdinalIgnoreCase))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
+    await calendarApi.DeleteEventAsync(sessionId, request);
+    return Results.NoContent();
+}).RequireAuthorization();
+
 app.MapPost("/auth/logout", async (HttpContext context, GoogleTokenStore tokenStore) =>
 {
     var expectedOrigin = oauth.FrontendOrigin;

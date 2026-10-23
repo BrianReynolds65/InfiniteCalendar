@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import {
   CalendarDays,
   Check,
@@ -10,12 +10,15 @@ import {
   ExternalLink,
   LoaderCircle,
   Plus,
+  RefreshCw,
   Settings2,
+  Trash2,
   X,
 } from 'lucide-react'
 import {
   getCalendarSelection,
   getGoogleSession,
+  deleteCalendarEvent,
   listCalendarEvents,
   listGoogleCalendars,
   logoutGoogle,
@@ -29,11 +32,6 @@ import {
 
 const WEEKS_PER_EXTENSION = 8
 const EVENT_POLL_INTERVAL_MS = 60_000
-const DEMO_CALENDARS: GoogleCalendar[] = [
-  { id: 'demo-work', summary: 'Studio', backgroundColor: '#18866b', primary: true },
-  { id: 'demo-personal', summary: 'Personal', backgroundColor: '#e8795d' },
-  { id: 'demo-family', summary: 'Family', backgroundColor: '#6978ca' },
-]
 
 function startOfWeek(date: Date): Date {
   const result = new Date(date.getFullYear(), date.getMonth(), date.getDate())
@@ -93,6 +91,22 @@ type EventDraft = {
   endDate: string
   startTime: string
   endTime: string
+  recurringEventId?: string
+}
+
+type EventDragState = {
+  eventId: string
+  targetDayKey: string | null
+  pointerX: number
+  pointerY: number
+}
+
+type ActiveEventDrag = {
+  event: CalendarEvent
+  pointerId: number
+  startX: number
+  startY: number
+  dragging: boolean
 }
 
 function eventTextColor(background: string): string {
@@ -109,38 +123,12 @@ function eventTextColor(background: string): string {
   return whiteContrast > darkContrast ? '#ffffff' : '#202a25'
 }
 
-function demoEvents(): CalendarEvent[] {
-  const today = new Date()
-  const monday = startOfWeek(today)
-  const items: Array<[number, number, string, string, number]> = [
-    [0, 9, 'Weekly studio sync', 'demo-work', 1],
-    [0, 14, 'Project: Fieldnotes', 'demo-work', 1],
-    [1, 11, 'Design review', 'demo-work', 1],
-    [1, 18, 'Dinner with Maya', 'demo-personal', 2],
-    [2, 8, 'School drop-off', 'demo-family', 1],
-    [2, 13, 'Focus block', 'demo-work', 2],
-    [3, 10, 'Product critique', 'demo-work', 1],
-    [3, 16, 'Dentist', 'demo-personal', 1],
-    [4, 9, 'Planning & priorities', 'demo-work', 1],
-    [4, 19, 'Movie night', 'demo-family', 2],
-    [5, 10, 'Farmers market', 'demo-personal', 3],
-    [6, 12, 'Sunday lunch', 'demo-family', 2],
-  ]
-  return items.map(([day, hour, title, calendarId, duration], index) => {
-    const start = addDays(monday, day)
-    start.setHours(hour, 0, 0, 0)
-    const end = new Date(start.getTime() + duration * 60 * 60 * 1000)
-    const calendar = DEMO_CALENDARS.find((item) => item.id === calendarId)!
-    return {
-      id: `demo-${index}`,
-      calendarId,
-      title,
-      start: start.toISOString(),
-      end: end.toISOString(),
-      allDay: false,
-      color: calendar.backgroundColor!,
-    }
-  })
+function dayKeyAtPoint(x: number, y: number): string | undefined {
+  for (const element of document.elementsFromPoint(x, y)) {
+    const dayCell = element.closest<HTMLElement>('[data-day-key]')
+    if (dayCell?.dataset.dayKey) return dayCell.dataset.dayKey
+  }
+  return undefined
 }
 
 function App() {
@@ -148,16 +136,20 @@ function App() {
     const monday = startOfWeek(new Date())
     return Array.from({ length: 16 }, (_, index) => addDays(monday, index * 7))
   })
-  const [calendars, setCalendars] = useState<GoogleCalendar[]>(DEMO_CALENDARS)
-  const [selectedIds, setSelectedIds] = useState<string[]>(DEMO_CALENDARS.map(({ id }) => id))
-  const [events, setEvents] = useState<CalendarEvent[]>(demoEvents)
+  const [calendars, setCalendars] = useState<GoogleCalendar[]>([])
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [events, setEvents] = useState<CalendarEvent[]>([])
   const [connected, setConnected] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [eventDraft, setEventDraft] = useState<EventDraft | null>(null)
+  const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false)
+  const [eventDrag, setEventDrag] = useState<EventDragState | null>(null)
+  const [movingEvent, setMovingEvent] = useState<{ eventId: string; targetDayKey: string } | null>(null)
   const [savingEvent, setSavingEvent] = useState(false)
   const [calendarMenuOpen, setCalendarMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [loadingEvents, setLoadingEvents] = useState(false)
+  const [refreshRequest, setRefreshRequest] = useState(0)
   const [error, setError] = useState('')
   const [visibleMonth, setVisibleMonth] = useState(() => new Date())
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -167,6 +159,8 @@ function App() {
   const previousScrollHeight = useRef(0)
   const pendingPrepend = useRef(false)
   const selectionSaveRef = useRef<Promise<void>>(Promise.resolve())
+  const activeEventDragRef = useRef<ActiveEventDrag | null>(null)
+  const suppressEventClickRef = useRef<string | null>(null)
 
   const selectedCalendars = useMemo(
     () => calendars.filter(({ id }) => selectedIds.includes(id)),
@@ -211,9 +205,9 @@ function App() {
 
     const expireSession = () => {
       setConnected(false)
-      setCalendars(DEMO_CALENDARS)
-      setSelectedIds(DEMO_CALENDARS.map(({ id }) => id))
-      setEvents(demoEvents())
+      setCalendars([])
+      setSelectedIds([])
+      setEvents([])
     }
     window.addEventListener('google-session-expired', expireSession)
     return () => {
@@ -280,10 +274,8 @@ function App() {
         if (!cancelled) setError(requestError instanceof Error ? requestError.message : 'Could not load calendar events.')
       } finally {
         if (!cancelled) {
-          if (initialLoad) {
-            setLoadingEvents(false)
-            initialLoad = false
-          }
+          setLoadingEvents(false)
+          initialLoad = false
           pollTimer = window.setTimeout(() => void refreshEvents(), EVENT_POLL_INTERVAL_MS)
         }
       }
@@ -294,7 +286,7 @@ function App() {
       cancelled = true
       if (pollTimer !== undefined) window.clearTimeout(pollTimer)
     }
-  }, [connected, firstWeek, lastWeek, selectedIds])
+  }, [connected, firstWeek, lastWeek, refreshRequest, selectedIds])
 
   useEffect(() => {
     const container = scrollRef.current
@@ -304,7 +296,13 @@ function App() {
         const element = rowRefs.current.get(week.getTime())
         return element && element.offsetTop + element.offsetHeight > container.scrollTop + 60
       })
-      if (currentRow) setVisibleMonth(currentRow)
+      if (currentRow) {
+        const days = Array.from({ length: 7 }, (_, index) => addDays(currentRow, index))
+        const firstOfMonth = days.find((day) => day.getDate() === 1)
+        const lastOfMonth = days.find((day) => day.getDate() === new Date(day.getFullYear(), day.getMonth() + 1, 0).getDate())
+        const representativeDay = firstOfMonth ?? lastOfMonth ?? days[3]
+        setVisibleMonth(new Date(representativeDay.getFullYear(), representativeDay.getMonth(), 1))
+      }
     }
     container.addEventListener('scroll', updateMonth, { passive: true })
     return () => container.removeEventListener('scroll', updateMonth)
@@ -378,9 +376,9 @@ function App() {
       return
     }
     setConnected(false)
-    setCalendars(DEMO_CALENDARS)
-    setSelectedIds(DEMO_CALENDARS.map(({ id }) => id))
-    setEvents(demoEvents())
+    setCalendars([])
+    setSelectedIds([])
+    setEvents([])
     setCalendarMenuOpen(false)
   }
 
@@ -410,6 +408,7 @@ function App() {
     }
 
     setError('')
+    setDeleteConfirmationOpen(false)
     setEventDraft({
       calendarId: selectedIds[0],
       title: '',
@@ -431,6 +430,7 @@ function App() {
       ? dateKey(addDays(new Date(`${eventDateKey(event.end)}T00:00:00`), -1))
       : eventDateKey(event.end)
     setError('')
+    setDeleteConfirmationOpen(false)
     setEventDraft({
       id: event.id,
       calendarId: event.calendarId,
@@ -440,6 +440,7 @@ function App() {
       endDate,
       startTime: event.allDay ? '09:00' : localTime(event.start),
       endTime: event.allDay ? '10:00' : localTime(event.end),
+      recurringEventId: event.recurringEventId,
     })
   }
 
@@ -489,6 +490,120 @@ function App() {
     }
   }
 
+  async function confirmDeleteEvent(wholeSeries: boolean) {
+    if (!eventDraft?.id) return
+    setSavingEvent(true)
+    setError('')
+    try {
+      await deleteCalendarEvent(eventDraft.id, eventDraft.calendarId, wholeSeries)
+      setEventDraft(null)
+      setDeleteConfirmationOpen(false)
+      setRefreshRequest((request) => request + 1)
+    } catch (deleteError: unknown) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete the calendar event.')
+    } finally {
+      setSavingEvent(false)
+    }
+  }
+
+  function beginEventDrag(pointerEvent: ReactPointerEvent<HTMLDivElement>, event: CalendarEvent) {
+    if (!connected || isMultiDaySpan(event) || (pointerEvent.pointerType === 'mouse' && pointerEvent.button !== 0)) return
+    pointerEvent.stopPropagation()
+    activeEventDragRef.current = {
+      event,
+      pointerId: pointerEvent.pointerId,
+      startX: pointerEvent.clientX,
+      startY: pointerEvent.clientY,
+      dragging: false,
+    }
+    pointerEvent.currentTarget.setPointerCapture(pointerEvent.pointerId)
+  }
+
+  function updateEventDrag(pointerEvent: ReactPointerEvent<HTMLDivElement>) {
+    const activeDrag = activeEventDragRef.current
+    if (!activeDrag || activeDrag.pointerId !== pointerEvent.pointerId) return
+    pointerEvent.stopPropagation()
+
+    if (!activeDrag.dragging && Math.hypot(pointerEvent.clientX - activeDrag.startX, pointerEvent.clientY - activeDrag.startY) < 8) return
+    activeDrag.dragging = true
+
+    setEventDrag({
+      eventId: activeDrag.event.id,
+      targetDayKey: dayKeyAtPoint(pointerEvent.clientX, pointerEvent.clientY) ?? null,
+      pointerX: pointerEvent.clientX,
+      pointerY: pointerEvent.clientY,
+    })
+  }
+
+  function finishEventDrag(pointerEvent: ReactPointerEvent<HTMLDivElement>) {
+    const activeDrag = activeEventDragRef.current
+    if (!activeDrag || activeDrag.pointerId !== pointerEvent.pointerId) return
+    pointerEvent.stopPropagation()
+
+    const targetDayKey = activeDrag.dragging
+      ? dayKeyAtPoint(pointerEvent.clientX, pointerEvent.clientY)
+      : undefined
+    activeEventDragRef.current = null
+    setEventDrag(null)
+
+    if (!activeDrag.dragging) return
+    suppressEventClickRef.current = activeDrag.event.id
+    window.setTimeout(() => {
+      if (suppressEventClickRef.current === activeDrag.event.id) suppressEventClickRef.current = null
+    }, 500)
+
+    if (targetDayKey && targetDayKey !== eventDateKey(activeDrag.event.start)) {
+      void moveSingleDayEvent(activeDrag.event, targetDayKey)
+    }
+  }
+
+  function cancelEventDrag(pointerEvent: ReactPointerEvent<HTMLDivElement>) {
+    const activeDrag = activeEventDragRef.current
+    if (!activeDrag || activeDrag.pointerId !== pointerEvent.pointerId) return
+    pointerEvent.stopPropagation()
+    activeEventDragRef.current = null
+    setEventDrag(null)
+  }
+
+  async function moveSingleDayEvent(event: CalendarEvent, targetDayKey: string) {
+    const dayOffset = dayNumber(targetDayKey) - dayNumber(eventDateKey(event.start))
+    if (!dayOffset) return
+
+    const shiftDate = (value: string) => {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        return dateKey(addDays(new Date(`${value}T00:00:00`), dayOffset))
+      }
+      const shifted = new Date(value)
+      shifted.setDate(shifted.getDate() + dayOffset)
+      return shifted.toISOString()
+    }
+
+    setError('')
+    setMovingEvent({ eventId: event.id, targetDayKey })
+    setLoadingEvents(true)
+    try {
+      await saveCalendarEvent({
+        id: event.id,
+        calendarId: event.calendarId,
+        title: event.title,
+        start: shiftDate(event.start),
+        end: shiftDate(event.end),
+        allDay: event.allDay,
+      })
+      const nextEvents = await listCalendarEvents(
+        selectedIds,
+        new Date(firstWeek),
+        addDays(new Date(lastWeek), 7),
+      )
+      setEvents(nextEvents)
+    } catch (moveError: unknown) {
+      setError(moveError instanceof Error ? moveError.message : 'Could not move the calendar event.')
+    } finally {
+      setLoadingEvents(false)
+      setMovingEvent(null)
+    }
+  }
+
   function scrollToToday() {
     const today = startOfWeek(new Date()).getTime()
     const row = rowRefs.current.get(today)
@@ -497,16 +612,18 @@ function App() {
 
   function moveMonth(direction: number) {
     const destination = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + direction, 1)
-    let target = weeks.find((week) => week.getMonth() === destination.getMonth() && week.getFullYear() === destination.getFullYear())
+    setVisibleMonth(destination)
+    const targetWeek = startOfWeek(destination)
+    let target = weeks.find((week) => week.getTime() === targetWeek.getTime())
     if (!target) {
       if (direction < 0) {
         const added = Array.from({ length: WEEKS_PER_EXTENSION }, (_, index) => addDays(weeks[0], (index - WEEKS_PER_EXTENSION) * 7))
         setWeeks((current) => [...added, ...current])
-        target = added.find((week) => week.getMonth() === destination.getMonth() && week.getFullYear() === destination.getFullYear())
+        target = added.find((week) => week.getTime() === targetWeek.getTime())
       } else {
         const added = Array.from({ length: WEEKS_PER_EXTENSION }, (_, index) => addDays(weeks[weeks.length - 1], (index + 1) * 7))
         setWeeks((current) => [...current, ...added])
-        target = added.find((week) => week.getMonth() === destination.getMonth() && week.getFullYear() === destination.getFullYear())
+        target = added.find((week) => week.getTime() === targetWeek.getTime())
       }
     }
     if (target) requestAnimationFrame(() => {
@@ -514,6 +631,10 @@ function App() {
       if (row && scrollRef.current) scrollRef.current.scrollTo({ top: row.offsetTop, behavior: 'smooth' })
     })
   }
+
+  const draggedEvent = eventDrag
+    ? events.find((event) => event.id === eventDrag.eventId)
+    : undefined
 
   return (
     <main className="app-shell">
@@ -524,7 +645,7 @@ function App() {
         </a>
         <div className="topbar-actions">
           <span className={`connection-status ${connected ? 'is-connected' : ''}`}>
-            <span className="status-dot" />{connected ? 'Google Calendar connected' : 'Preview calendar'}
+            <span className="status-dot" />{connected ? 'Google Calendar connected' : 'Not connected'}
           </span>
           {connected ? (
             <button className="button button-outline" onClick={() => void disconnectGoogle()}>Disconnect</button>
@@ -547,6 +668,16 @@ function App() {
             </div>
           </div>
           <div className="toolbar-actions">
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Refresh calendar"
+              title="Refresh calendar"
+              disabled={!connected || loadingEvents || selectedIds.length === 0}
+              onClick={() => setRefreshRequest((request) => request + 1)}
+            >
+              {loadingEvents ? <LoaderCircle className="spin" size={18} /> : <RefreshCw size={18} />}
+            </button>
             <button className="button button-outline today-button" onClick={scrollToToday}>Today</button>
             <div className="calendar-picker-wrap">
               <button className="button button-outline calendar-picker" onClick={() => setCalendarMenuOpen((open) => !open)} aria-expanded={calendarMenuOpen}>
@@ -579,7 +710,6 @@ function App() {
           {weeks.map((week) => {
             const weekKey = week.getTime()
             const multiDaySpans = multiDaySpansByWeek.get(weekKey) ?? []
-            const multiDayLaneCount = multiDaySpans.reduce((count, span) => Math.max(count, span.lane + 1), 0)
             return (
               <section className="week-row" key={weekKey} ref={(element) => {
                 if (element) rowRefs.current.set(weekKey, element)
@@ -587,17 +717,32 @@ function App() {
               }} aria-label={`Week of ${new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(week)}`}>
                 {Array.from({ length: 7 }, (_, index) => {
                   const day = addDays(week, index)
+                  const dayColumn = index + 1
+                  const dayLaneCount = multiDaySpans.reduce(
+                    (count, span) => span.startColumn <= dayColumn && span.endColumn > dayColumn
+                      ? Math.max(count, span.lane + 1)
+                      : count,
+                    0,
+                  )
                   const dayEvents = eventsByDay.get(dateKey(day)) ?? []
                   const visibleDayEvents = dayEvents.filter((event) => !isMultiDaySpan(event))
                   const today = dateKey(day) === dateKey(new Date())
+                  const pastDay = dateKey(day) < dateKey(new Date())
                   const outsideMonth = day.getMonth() !== visibleMonth.getMonth() || day.getFullYear() !== visibleMonth.getFullYear()
                   const monthTone = day.getMonth() % 2 === 0 ? 'month-tone-a' : 'month-tone-b'
                   const weekend = day.getDay() === 0 || day.getDay() === 6
                   return (
                     <div
-                      className={`day-cell ${monthTone} ${weekend ? 'is-weekend' : ''} ${today ? 'is-today' : ''} ${outsideMonth ? 'outside-month' : ''}`}
+                      className={`day-cell ${monthTone} ${weekend ? 'is-weekend' : ''} ${pastDay ? 'is-past' : ''} ${today ? 'is-today' : ''} ${outsideMonth ? 'outside-month' : ''} ${eventDrag?.targetDayKey === dateKey(day) ? 'is-drop-target' : ''} ${movingEvent?.targetDayKey === dateKey(day) ? 'is-moving-target' : ''}`}
                       key={dateKey(day)}
-                      onClick={() => openNewEvent(day)}
+                      data-day-key={dateKey(day)}
+                      onClick={() => {
+                        if (suppressEventClickRef.current) {
+                          suppressEventClickRef.current = null
+                          return
+                        }
+                        openNewEvent(day)
+                      }}
                     >
                       <div className="day-label">
                         <span className="day-number">{new Intl.DateTimeFormat(undefined, { day: '2-digit' }).format(day)}</span>
@@ -609,16 +754,33 @@ function App() {
                         )}
                         {today && <i>Today</i>}
                       </div>
-                      <div className="day-events" style={{ marginTop: `calc(${multiDayLaneCount} * var(--all-day-lane-height))` }}>
+                      {movingEvent?.targetDayKey === dateKey(day) && (
+                        <div className="event-move-indicator" role="status">
+                          <LoaderCircle className="spin" size={14} />
+                          <span>Moving event</span>
+                        </div>
+                      )}
+                      <div className="day-events" style={{ marginTop: `calc(${dayLaneCount} * var(--all-day-lane-height))` }}>
                         {visibleDayEvents.slice(0, 4).map((event) => (
                           <div
-                            className="event"
+                            className={`event ${connected ? 'is-draggable' : ''} ${eventDrag?.eventId === event.id ? 'is-dragging' : ''}`}
                             key={event.id}
                             title={`${event.title}${event.allDay ? '' : ` · ${formatTime(event.start)}`}`}
                             style={{ backgroundColor: event.color, color: eventTextColor(event.color) }}
                             role="button"
                             tabIndex={0}
-                            onClick={(clickEvent) => { clickEvent.stopPropagation(); openEditEvent(event) }}
+                            onClick={(clickEvent) => {
+                              clickEvent.stopPropagation()
+                              if (suppressEventClickRef.current === event.id) {
+                                suppressEventClickRef.current = null
+                                return
+                              }
+                              openEditEvent(event)
+                            }}
+                            onPointerDown={(pointerEvent) => beginEventDrag(pointerEvent, event)}
+                            onPointerMove={updateEventDrag}
+                            onPointerUp={finishEventDrag}
+                            onPointerCancel={cancelEventDrag}
                             onKeyDown={(keyEvent) => {
                               if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
                                 keyEvent.preventDefault()
@@ -647,7 +809,7 @@ function App() {
                     title={`${event.title}${event.allDay ? '' : ` · ${formatTime(event.start)}–${formatTime(event.end)}`}`}
                     role="button"
                     tabIndex={0}
-                    onClick={() => openEditEvent(event)}
+                    onClick={(clickEvent) => { clickEvent.stopPropagation(); openEditEvent(event) }}
                     onKeyDown={(keyEvent) => {
                       if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
                         keyEvent.preventDefault()
@@ -674,16 +836,39 @@ function App() {
             )
           })}
           <div className="scroll-sentinel bottom-sentinel" ref={bottomSentinelRef} />
-          {loadingEvents && <div className="loading-indicator"><LoaderCircle className="spin" size={15} /> Updating events</div>}
+          {loadingEvents && !movingEvent && (
+            <div className="loading-indicator" role="status">
+              <LoaderCircle className="spin" size={15} />
+              Updating events
+            </div>
+          )}
         </div>
 
         <footer className="calendar-footer">
-          <span>{connected ? `${selectedCalendars.length} calendars synced` : 'Sample week · connect Google to see your calendar'}</span>
+          <span>{connected ? `${selectedCalendars.length} calendars synced` : 'Connect Google Calendar to see your events'}</span>
           <button className="footer-help" onClick={() => setSettingsOpen(true)}><CircleHelp size={15} /> Setup</button>
         </footer>
       </section>
 
-      {error && (
+      {eventDrag && draggedEvent && (
+        <div
+          className="event-drag-ghost"
+          aria-hidden="true"
+          style={{
+            backgroundColor: draggedEvent.color,
+            color: eventTextColor(draggedEvent.color),
+            left: Math.max(16, Math.min(eventDrag.pointerX + 14, window.innerWidth - Math.min(260, window.innerWidth - 32) - 16)),
+            top: eventDrag.pointerY + 14,
+            width: 'min(260px, calc(100vw - 32px))',
+          }}
+        >
+          <span className="event-dot" style={{ backgroundColor: draggedEvent.color }} />
+          {!draggedEvent.allDay && <span className="event-time">{formatTime(draggedEvent.start)}</span>}
+          <span className="event-title">{draggedEvent.title}</span>
+        </div>
+      )}
+
+      {error && !eventDraft && (
         <div className="toast-error" role="alert">
           <span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button>
         </div>
@@ -710,12 +895,36 @@ function App() {
       )}
 
       {eventDraft && (
-        <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingEvent) setEventDraft(null) }}>
+        <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingEvent) { setEventDraft(null); setDeleteConfirmationOpen(false) } }}>
           <form className="settings-dialog event-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="event-editor-title" onSubmit={(formEvent) => void submitEvent(formEvent)}>
             <div className="dialog-heading">
-              <div><span className="eyebrow">YOUR CALENDAR</span><h2 id="event-editor-title">{eventDraft.id ? 'Edit event' : 'New event'}</h2></div>
-              <button className="icon-button" type="button" onClick={() => setEventDraft(null)} aria-label="Close event editor" disabled={savingEvent}><X size={18} /></button>
+              <div><span className="eyebrow">YOUR CALENDAR</span><h2 id="event-editor-title">{deleteConfirmationOpen ? 'Delete event?' : eventDraft.id ? 'Edit event' : 'New event'}</h2></div>
+              <button className="icon-button" type="button" onClick={() => { setEventDraft(null); setDeleteConfirmationOpen(false) }} aria-label="Close event editor" disabled={savingEvent}><X size={18} /></button>
             </div>
+            {error && <p className="dialog-error" role="alert">{error}</p>}
+            {deleteConfirmationOpen ? (
+              <>
+                <p className="dialog-copy">
+                  {eventDraft.recurringEventId
+                    ? 'This event is part of a recurring series. Choose whether to delete only this occurrence or the entire series.'
+                    : 'This will permanently delete this event from Google Calendar.'}
+                </p>
+                <div className="dialog-actions">
+                  <button className="button button-outline" type="button" onClick={() => setDeleteConfirmationOpen(false)} disabled={savingEvent}>Cancel</button>
+                  {eventDraft.recurringEventId ? (
+                    <>
+                      <button className="button button-danger" type="button" onClick={() => void confirmDeleteEvent(false)} disabled={savingEvent}>Just this event</button>
+                      <button className="button button-danger" type="button" onClick={() => void confirmDeleteEvent(true)} disabled={savingEvent}>Entire series</button>
+                    </>
+                  ) : (
+                    <button className="button button-danger" type="button" onClick={() => void confirmDeleteEvent(false)} disabled={savingEvent}>
+                      {savingEvent && <LoaderCircle className="spin" size={16} />} Delete event
+                    </button>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
             <label className="field-label" htmlFor="event-title">Event name</label>
             <input
               id="event-title"
@@ -791,12 +1000,19 @@ function App() {
               )}
             </div>
             <div className="dialog-actions">
+              {eventDraft.id && (
+                <button className="button button-danger" type="button" onClick={() => { setError(''); setDeleteConfirmationOpen(true) }} disabled={savingEvent}>
+                  <Trash2 size={16} /> Delete
+                </button>
+              )}
               <button className="button button-outline" type="button" onClick={() => setEventDraft(null)} disabled={savingEvent}>Cancel</button>
               <button className="button button-dark" type="submit" disabled={savingEvent}>
                 {savingEvent ? <LoaderCircle className="spin" size={16} /> : <CalendarDays size={16} />}
                 {eventDraft.id ? 'Save changes' : 'Create event'}
               </button>
             </div>
+              </>
+            )}
           </form>
         </div>
       )}

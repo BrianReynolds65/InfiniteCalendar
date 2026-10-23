@@ -53,6 +53,11 @@ public sealed record GoogleEventWriteRequest(
     string End,
     bool AllDay);
 
+public sealed record GoogleEventDeleteRequest(
+    string EventId,
+    string CalendarId,
+    bool WholeSeries);
+
 public sealed class GoogleTokenStore
 {
     private readonly IDataProtector _protector;
@@ -195,7 +200,8 @@ public sealed class GoogleCalendarApi(
                     item.End!.Value!,
                     item.Start.DateTime is null,
                     calendar.BackgroundColor ?? "#16866a",
-                    item.Location))
+                    item.Location,
+                    item.RecurringEventId))
                 .ToArray();
         }));
 
@@ -266,6 +272,47 @@ public sealed class GoogleCalendarApi(
                 throw new GoogleSessionException("Google authorization expired. Please connect again.");
             throw new GoogleApiException(
                 error?.Error?.Message ?? $"Google Calendar could not save the event ({(int)response.StatusCode}).",
+                response.StatusCode);
+        }
+    }
+
+    public async Task DeleteEventAsync(string sessionId, GoogleEventDeleteRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.CalendarId) || string.IsNullOrWhiteSpace(request.EventId))
+            throw new GoogleApiException("Choose an event to delete.", HttpStatusCode.BadRequest);
+
+        var calendar = (await ListCalendarsAsync(sessionId))
+            .FirstOrDefault(item => string.Equals(item.Id, request.CalendarId, StringComparison.Ordinal));
+        if (calendar is null)
+            throw new GoogleApiException("This calendar is not available to your Google account.", HttpStatusCode.BadRequest);
+
+        var eventPrefix = $"{calendar.Id}:";
+        if (!request.EventId.StartsWith(eventPrefix, StringComparison.Ordinal)
+            || request.EventId.Length == eventPrefix.Length)
+            throw new GoogleApiException("This event cannot be deleted from the selected calendar.", HttpStatusCode.BadRequest);
+
+        var eventId = request.EventId[eventPrefix.Length..];
+        var accessToken = await GetAccessTokenAsync(sessionId);
+        if (request.WholeSeries)
+        {
+            var instanceUri = $"https://www.googleapis.com/calendar/v3/calendars/{Uri.EscapeDataString(calendar.Id)}/events/{Uri.EscapeDataString(eventId)}";
+            var instance = await GetAsync<GoogleEvent>(instanceUri, accessToken);
+            if (string.IsNullOrWhiteSpace(instance.RecurringEventId))
+                throw new GoogleApiException("This event is not part of a recurring series.", HttpStatusCode.BadRequest);
+            eventId = instance.RecurringEventId;
+        }
+
+        var uri = $"https://www.googleapis.com/calendar/v3/calendars/{Uri.EscapeDataString(calendar.Id)}/events/{Uri.EscapeDataString(eventId)}";
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Delete, uri);
+        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using var response = await httpClient.SendAsync(httpRequest);
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadFromJsonAsync<GoogleErrorEnvelope>(JsonOptions);
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+                throw new GoogleSessionException("Google authorization expired. Please connect again.");
+            throw new GoogleApiException(
+                error?.Error?.Message ?? $"Google Calendar could not delete the event ({(int)response.StatusCode}).",
                 response.StatusCode);
         }
     }
@@ -347,7 +394,8 @@ public sealed record CalendarEvent(
     string End,
     bool AllDay,
     string Color,
-    string? Location);
+    string? Location,
+    string? RecurringEventId = null);
 
 internal sealed class CalendarListResponse
 {
@@ -366,6 +414,7 @@ internal sealed class GoogleEvent
     public string? Location { get; init; }
     public GoogleEventDate? Start { get; init; }
     public GoogleEventDate? End { get; init; }
+    public string? RecurringEventId { get; init; }
 }
 
 internal sealed class GoogleEventDate

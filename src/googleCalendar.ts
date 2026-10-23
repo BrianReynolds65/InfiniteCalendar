@@ -14,6 +14,7 @@ export type CalendarEvent = {
   allDay: boolean
   color: string
   location?: string
+  recurringEventId?: string
 }
 
 export type CalendarEventInput = {
@@ -92,5 +93,17 @@ export function saveCalendarEvent(event: CalendarEventInput): Promise<void> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(event),
+  })
+}
+
+export function deleteCalendarEvent(
+  eventId: string,
+  calendarId: string,
+  wholeSeries: boolean,
+): Promise<void> {
+  return apiRequest<void>('/api/events/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ eventId, calendarId, wholeSeries }),
   })
 }

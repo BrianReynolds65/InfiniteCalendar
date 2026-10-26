@@ -9,7 +9,6 @@ import {
   Clock3,
   ExternalLink,
   LoaderCircle,
-  ListTodo,
   Plus,
   RefreshCw,
   Settings2,
@@ -42,6 +41,7 @@ import {
 
 const WEEKS_PER_EXTENSION = 8
 const EVENT_POLL_INTERVAL_MS = 60_000
+const INACTIVITY_RESET_DELAY_MS = 5 * 60_000
 
 function startOfWeek(date: Date): Date {
   const result = new Date(date.getFullYear(), date.getMonth(), date.getDate())
@@ -59,6 +59,26 @@ function dateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
+function formatTodayLabel(date: Date): string {
+  const day = date.getDate()
+  const ordinal = day % 100 >= 11 && day % 100 <= 13
+    ? 'th'
+    : ({ 1: 'st', 2: 'nd', 3: 'rd' }[day % 10] ?? 'th')
+  const weekdayAndMonth = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    month: 'long',
+  }).format(date)
+  return `${weekdayAndMonth} ${day}${ordinal}`
+}
+
+function formatCurrentTime(date: Date): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    hourCycle: 'h12',
+  }).format(date)
+}
+
 function eventDateKey(value: string): string {
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value
   return dateKey(new Date(value))
@@ -67,6 +87,17 @@ function eventDateKey(value: string): string {
 function dayNumber(value: string): number {
   const [year, month, day] = value.split('-').map(Number)
   return Date.UTC(year, month - 1, day) / 86_400_000
+}
+
+function dayPosition(value: string): number {
+  const date = new Date(value)
+  const fractionOfDay = (
+    date.getHours() * 60 * 60 * 1000
+    + date.getMinutes() * 60 * 1000
+    + date.getSeconds() * 1000
+    + date.getMilliseconds()
+  ) / 86_400_000
+  return dayNumber(eventDateKey(value)) + fractionOfDay
 }
 
 function eventEndExclusiveDay(event: CalendarEvent): number {
@@ -158,6 +189,7 @@ function dayKeyAtPoint(x: number, y: number): string | undefined {
 }
 
 function App() {
+  const [now, setNow] = useState(() => new Date())
   const [weeks, setWeeks] = useState<Date[]>(() => {
     const monday = startOfWeek(new Date())
     return Array.from({ length: 16 }, (_, index) => addDays(monday, index * 7))
@@ -178,8 +210,7 @@ function App() {
   const [eventDrag, setEventDrag] = useState<EventDragState | null>(null)
   const [movingEvent, setMovingEvent] = useState<{ eventId: string; targetDayKey: string } | null>(null)
   const [savingEvent, setSavingEvent] = useState(false)
-  const [calendarMenuOpen, setCalendarMenuOpen] = useState(false)
-  const [taskListMenuOpen, setTaskListMenuOpen] = useState(false)
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [loadingEvents, setLoadingEvents] = useState(false)
   const [loadingTasks, setLoadingTasks] = useState(false)
@@ -197,6 +228,31 @@ function App() {
   const pendingPrepend = useRef(false)
   const selectionSaveRef = useRef<Promise<void>>(Promise.resolve())
   const taskSelectionSaveRef = useRef<Promise<void>>(Promise.resolve())
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(new Date()), 60_000)
+    return () => window.clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    let timeout = window.setTimeout(scrollToToday, INACTIVITY_RESET_DELAY_MS)
+    const resetInactivityTimer = () => {
+      window.clearTimeout(timeout)
+      timeout = window.setTimeout(scrollToToday, INACTIVITY_RESET_DELAY_MS)
+    }
+    const activityEvents = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const
+
+    activityEvents.forEach((eventName) => {
+      window.addEventListener(eventName, resetInactivityTimer, { passive: true })
+    })
+    return () => {
+      window.clearTimeout(timeout)
+      activityEvents.forEach((eventName) => {
+        window.removeEventListener(eventName, resetInactivityTimer)
+      })
+    }
+  }, [])
+
   const selectedTaskListIdsRef = useRef<string[]>([])
   const activeEventDragRef = useRef<ActiveEventDrag | null>(null)
   const suppressEventClickRef = useRef<string | null>(null)
@@ -481,6 +537,8 @@ function App() {
       event: CalendarEvent
       startColumn: number
       endColumn: number
+      startPosition: number
+      endPosition: number
       lane: number
     }>>()
 
@@ -497,6 +555,10 @@ function App() {
           event,
           startColumn: Math.max(eventStart, weekStart) - weekStart + 1,
           endColumn: Math.min(eventEnd, weekEnd) - weekStart + 1,
+          startPosition: event.allDay ? Math.max(eventStart, weekStart) : Math.max(dayPosition(event.start), weekStart),
+          endPosition: event.allDay
+            ? Math.min(eventEnd, weekEnd)
+            : Math.min(dayPosition(event.end), weekEnd),
           duration: eventEnd - eventStart,
         }]
       }).sort((a, b) => b.duration - a.duration || a.startColumn - b.startColumn || a.endColumn - b.endColumn)
@@ -506,7 +568,14 @@ function App() {
         let lane = laneEndColumns.findIndex((endColumn) => endColumn <= segment.startColumn)
         if (lane < 0) lane = laneEndColumns.length
         laneEndColumns[lane] = segment.endColumn
-        return { event: segment.event, startColumn: segment.startColumn, endColumn: segment.endColumn, lane }
+        return {
+          event: segment.event,
+          startColumn: segment.startColumn,
+          endColumn: segment.endColumn,
+          startPosition: segment.startPosition,
+          endPosition: segment.endPosition,
+          lane,
+        }
       })
       spansByWeek.set(week.getTime(), spans)
     }
@@ -535,8 +604,7 @@ function App() {
     setSelectedTaskListIds([])
     setTasks([])
     setTaskError('')
-    setCalendarMenuOpen(false)
-    setTaskListMenuOpen(false)
+    setSettingsMenuOpen(false)
   }
 
   function toggleCalendar(id: string) {
@@ -867,26 +935,6 @@ function App() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#top" aria-label="Infinite Calendar home">
-          <span className="brand-mark"><CalendarDays size={20} strokeWidth={2.2} /></span>
-          <span>daybook<span className="brand-period">.</span></span>
-        </a>
-        <div className="topbar-actions">
-          <span className={`connection-status ${connected ? 'is-connected' : ''}`}>
-            <span className="status-dot" />{connected ? 'Google Calendar connected' : 'Not connected'}
-          </span>
-          {connected ? (
-            <button className="button button-outline" onClick={() => void disconnectGoogle()}>Disconnect</button>
-          ) : (
-            <button className="button button-dark" onClick={connectGoogle} disabled={busy}>
-              {busy ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}
-              Connect Google
-            </button>
-          )}
-        </div>
-      </header>
-
       <section className="calendar-area" id="top">
         <div className="calendar-toolbar">
           <div className="month-navigation">
@@ -895,6 +943,10 @@ function App() {
               <button className="icon-button" aria-label="Previous month" title="Previous month" onClick={() => moveMonth(-1)}><ChevronLeft size={18} /></button>
               <button className="icon-button" aria-label="Next month" title="Next month" onClick={() => moveMonth(1)}><ChevronRight size={18} /></button>
             </div>
+          </div>
+          <div className="today-date">
+            <span>{formatTodayLabel(now)}</span>
+            <time dateTime={now.toISOString()}>{formatCurrentTime(now)}</time>
           </div>
           <div className="toolbar-actions">
             <button
@@ -909,21 +961,71 @@ function App() {
             </button>
             <button className="button button-outline today-button" onClick={scrollToToday}>Today</button>
             <div className="calendar-picker-wrap">
-              <button className="button button-outline calendar-picker" onClick={() => setCalendarMenuOpen((open) => !open)} aria-expanded={calendarMenuOpen}>
-                <span className="calendar-stack">{selectedCalendars.slice(0, 3).map((calendar) => <i key={calendar.id} style={{ backgroundColor: calendar.backgroundColor }} />)}</span>
-                Calendars <span className="selection-count">{selectedCalendars.length}</span><ChevronDown size={15} />
+              <button
+                className="icon-button settings-menu-button"
+                type="button"
+                aria-label="Settings"
+                title="Settings"
+                aria-expanded={settingsMenuOpen}
+                onClick={() => setSettingsMenuOpen((open) => !open)}
+              >
+                <Settings2 size={19} />
               </button>
-              {calendarMenuOpen && (
-                <div className="calendar-menu">
-                  <div className="menu-heading">Show calendars</div>
-                  {calendars.map((calendar) => (
-                    <button className="calendar-option" key={calendar.id} onClick={() => toggleCalendar(calendar.id)}>
+              {settingsMenuOpen && (
+                <div className="calendar-menu settings-menu">
+                  <div className="settings-account">
+                    <span className={`status-dot ${connected ? 'is-connected' : ''}`} />
+                    <span>{connected ? 'Google account connected' : 'Google account not connected'}</span>
+                  </div>
+                  {connected ? (
+                    <button className="settings-action" type="button" onClick={() => void disconnectGoogle()}>
+                      Disconnect Google
+                    </button>
+                  ) : (
+                    <button className="settings-action settings-connect" type="button" onClick={connectGoogle} disabled={busy}>
+                      {busy ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />}
+                      Connect Google
+                    </button>
+                  )}
+                  <div className="menu-heading settings-menu-heading">
+                    Calendars <span className="selection-count">{selectedIds.length}</span>
+                  </div>
+                  {!connected ? (
+                    <div className="settings-empty">Connect Google to choose calendars.</div>
+                  ) : calendars.length === 0 ? (
+                    <div className="settings-empty">No calendars found.</div>
+                  ) : calendars.map((calendar) => (
+                    <button className="calendar-option" type="button" key={calendar.id} onClick={() => toggleCalendar(calendar.id)}>
                       <span className="calendar-color" style={{ backgroundColor: calendar.backgroundColor }} />
                       <span className="calendar-name">{calendar.summary}</span>
                       <span className={`checkmark ${selectedIds.includes(calendar.id) ? 'checked' : ''}`}>{selectedIds.includes(calendar.id) && <Check size={13} />}</span>
                     </button>
                   ))}
-                  <button className="menu-settings" onClick={() => { setCalendarMenuOpen(false); setSettingsOpen(true) }}><Settings2 size={15} /> Calendar settings</button>
+                  <div className="menu-heading settings-section-heading settings-menu-heading">
+                    Task lists <span className="selection-count">{selectedTaskListIds.length}</span>
+                  </div>
+                  {!connected ? (
+                    <div className="settings-empty">Connect Google to choose task lists.</div>
+                  ) : loadingTaskLists && taskLists.length === 0 ? (
+                    <div className="settings-empty"><LoaderCircle className="spin" size={14} /> Loading task lists…</div>
+                  ) : taskLists.length === 0 ? (
+                    <div className="settings-empty">No task lists found.</div>
+                  ) : taskLists.map((taskList) => (
+                    <button
+                      className="calendar-option"
+                      type="button"
+                      key={taskList.id}
+                      onClick={() => toggleTaskList(taskList.id)}
+                    >
+                      <span className="calendar-name">{taskList.title}</span>
+                      <span className={`checkmark ${selectedTaskListIds.includes(taskList.id) ? 'checked' : ''}`}>
+                        {selectedTaskListIds.includes(taskList.id) && <Check size={13} />}
+                      </span>
+                    </button>
+                  ))}
+                  <button className="menu-settings" type="button" onClick={() => { setSettingsMenuOpen(false); setSettingsOpen(true) }}>
+                    <CircleHelp size={15} /> Google setup help
+                  </button>
                 </div>
               )}
             </div>
@@ -1031,7 +1133,7 @@ function App() {
                     </div>
                   )
                 })}
-                {multiDaySpans.map(({ event, startColumn, endColumn, lane }) => (
+                {multiDaySpans.map(({ event, startColumn, endColumn, startPosition, endPosition, lane }) => (
                   <div
                     className={`event multi-day-span ${event.allDay ? 'all-day-span' : 'timed-span'}`}
                     key={event.id}
@@ -1048,8 +1150,12 @@ function App() {
                     style={{
                       backgroundColor: event.color,
                       color: eventTextColor(event.color),
-                      left: `calc(${((startColumn - 1) / 7) * 100}% + var(--day-cell-side-padding))`,
-                      width: `calc(${((endColumn - startColumn) / 7) * 100}% - var(--day-cell-side-padding) - var(--day-cell-side-padding))`,
+                      left: event.allDay
+                        ? `calc(${((startColumn - 1) / 7) * 100}% + var(--day-cell-side-padding))`
+                        : `${((startPosition - dayNumber(dateKey(week))) / 7) * 100}%`,
+                      width: event.allDay
+                        ? `calc(${((endColumn - startColumn) / 7) * 100}% - var(--day-cell-side-padding) - var(--day-cell-side-padding))`
+                        : `${((endPosition - startPosition) / 7) * 100}%`,
                       top: `calc(var(--day-cell-top) + var(--day-label-height) + ${lane} * var(--all-day-lane-height))`,
                     }}
                   >
@@ -1073,18 +1179,10 @@ function App() {
           )}
         </div>
 
-        <footer className="calendar-footer">
-          <span>{connected ? `${selectedCalendars.length} calendars synced` : 'Connect Google Calendar to see your events'}</span>
-          <button className="footer-help" onClick={() => setSettingsOpen(true)}><CircleHelp size={15} /> Setup</button>
-        </footer>
       </section>
 
-      <section className="tasks-panel" aria-labelledby="tasks-heading">
+      <section className="tasks-panel" aria-label="Google Tasks">
         <div className="tasks-panel-header">
-          <div className="tasks-heading">
-            <ListTodo size={18} />
-            <h2 id="tasks-heading">Google Tasks</h2>
-          </div>
           <div className="tasks-panel-actions">
             <button
               className="icon-button"
@@ -1096,36 +1194,6 @@ function App() {
             >
               {loadingTasks ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}
             </button>
-            <div className="task-list-picker-wrap">
-              <button
-                className="button button-outline task-list-picker"
-                type="button"
-                aria-expanded={taskListMenuOpen}
-                onClick={() => setTaskListMenuOpen((open) => !open)}
-                disabled={!connected || loadingTaskLists || taskLists.length === 0}
-              >
-                Task lists <span className="selection-count">{selectedTaskListIds.length}</span>
-                <ChevronDown size={15} />
-              </button>
-              {taskListMenuOpen && (
-                <div className="task-list-menu">
-                  <div className="menu-heading">Show task lists</div>
-                  {taskLists.map((taskList) => (
-                    <button
-                      className="calendar-option"
-                      type="button"
-                      key={taskList.id}
-                      onClick={() => toggleTaskList(taskList.id)}
-                    >
-                      <span className="calendar-name">{taskList.title}</span>
-                      <span className={`checkmark ${selectedTaskListIds.includes(taskList.id) ? 'checked' : ''}`}>
-                        {selectedTaskListIds.includes(taskList.id) && <Check size={13} />}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
           </div>
         </div>
         <div className="tasks-panel-content">
@@ -1181,7 +1249,7 @@ function App() {
                         aria-label={`Add task to ${taskList.title}`}
                         title="Add task"
                       >
-                        <Plus size={15} />
+                        <Plus size={30} />
                       </button>
                     </div>
                     {listTasks.length === 0 ? (
@@ -1189,7 +1257,7 @@ function App() {
                     ) : (
                       <div className="task-list-items">
                         {activeTasks.length > 0 && <ul>{activeTasks.map(renderTask)}</ul>}
-                        {completedTasks.length > 0 && (
+                        {completedTasks.length > 0 && false && (
                           <details className="completed-task-section">
                             <summary>
                               <span>Completed</span>

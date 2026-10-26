@@ -1,0 +1,25 @@
+services:
+  api:
+    build:
+      context: ./server
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Google__ClientId: ${GOOGLE_CLIENT_ID:?Set GOOGLE_CLIENT_ID in .env}
+      Google__ClientSecret: ${GOOGLE_CLIENT_SECRET:?Set GOOGLE_CLIENT_SECRET in .env}
+      Google__FrontendOrigin: ${GOOGLE_FRONTEND_ORIGIN:-https://calendar.breynolds.org}
+      InfiniteCalendar__DataDirectory: /data
+    expose:
+      - "8080"
+    volumes:
+      - infinitecalendar_data:/data
+    networks:
+      - calendar_proxy
+
+volumes:
+  infinitecalendar_data:
+
+networks:
+  calendar_proxy:
+    name: calendar-proxy
+    driver: bridge

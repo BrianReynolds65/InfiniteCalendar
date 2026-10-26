@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "Infinite Calendar",
+  "short_name": "Calendar",
+  "description": "A continuous week-by-week calendar for Google Calendar.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f7f4",
+  "theme_color": "#f5f7f4",
+  "icons": [
+    {
+      "src": "/calendar-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

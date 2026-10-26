@@ -3,3 +3,4 @@ dist/
 *.tsbuildinfo
 server/bin/
 server/obj/
+.env

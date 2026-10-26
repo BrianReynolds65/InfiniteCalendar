@@ -16,6 +16,8 @@ public sealed record GoogleOAuthSettings(string ClientId, string ClientSecret, s
     public const string CalendarEventsScope = "https://www.googleapis.com/auth/calendar.events";
     public const string CalendarListScope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
     public const string CalendarScopes = $"{CalendarEventsScope} {CalendarListScope}";
+    public const string TasksScope = "https://www.googleapis.com/auth/tasks";
+    public const string OAuthScopes = $"{CalendarScopes} {TasksScope}";
     public bool IsConfigured => !string.IsNullOrWhiteSpace(ClientId) && !string.IsNullOrWhiteSpace(ClientSecret);
     public string CallbackUri => $"{FrontendOrigin}/auth/callback";
 
@@ -58,6 +60,20 @@ public sealed record GoogleEventDeleteRequest(
     string CalendarId,
     bool WholeSeries);
 
+/// <summary>Payload for creating or updating a Google Task.</summary>
+public sealed record GoogleTaskWriteRequest(
+    string? Id,
+    string TaskListId,
+    string Title,
+    string? Notes,
+    string? DueDate);
+
+/// <summary>Payload for marking a Google Task complete or reopening it.</summary>
+public sealed record GoogleTaskCompletionRequest(
+    string TaskListId,
+    string TaskId,
+    bool Completed);
+
 public sealed class GoogleTokenStore
 {
     private readonly IDataProtector _protector;
@@ -94,14 +110,43 @@ public sealed class GoogleTokenStore
         return JsonSerializer.Deserialize<string[]>(_selectionProtector.Unprotect(encrypted));
     }
 
+    public async Task<string[]?> GetSelectedTaskListIdsAsync(string sessionId)
+    {
+        var path = GetTaskSelectionPath(sessionId);
+        if (!File.Exists(path)) return null;
+        var encrypted = await File.ReadAllTextAsync(path);
+        return JsonSerializer.Deserialize<string[]>(_selectionProtector.Unprotect(encrypted));
+    }
+
     public async Task SaveSelectedCalendarIdsAsync(string sessionId, string[] calendarIds)
     {
         await SaveEncryptedAsync(GetSelectionPath(sessionId), _selectionProtector, JsonSerializer.Serialize(calendarIds));
     }
 
+    public async Task SaveSelectedTaskListIdsAsync(string sessionId, string[] taskListIds)
+    {
+        await SaveEncryptedAsync(GetTaskSelectionPath(sessionId), _selectionProtector, JsonSerializer.Serialize(taskListIds));
+    }
+
     public Task DeleteAsync(string sessionId)
     {
-        foreach (var path in new[] { GetPath(sessionId), GetSelectionPath(sessionId) })
+        foreach (var path in new[] { GetPath(sessionId), GetSelectionPath(sessionId), GetTaskSelectionPath(sessionId) })
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteTokenAsync(string sessionId)
+    {
+        var path = GetPath(sessionId);
+        if (File.Exists(path)) File.Delete(path);
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteSelectionsAsync(string settingsId)
+    {
+        foreach (var path in new[] { GetSelectionPath(settingsId), GetTaskSelectionPath(settingsId) })
         {
             if (File.Exists(path)) File.Delete(path);
         }
@@ -121,6 +166,9 @@ public sealed class GoogleTokenStore
 
     private string GetSelectionPath(string sessionId) =>
         Path.Combine(_directory, $"{GetSessionFileName(sessionId)}.selection");
+
+    private string GetTaskSelectionPath(string sessionId) =>
+        Path.Combine(_directory, $"{GetSessionFileName(sessionId)}.task-selection");
 
     private static string GetSessionFileName(string sessionId) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sessionId)));
@@ -145,7 +193,162 @@ public sealed class GoogleCalendarApi(
         return result.Items ?? [];
     }
 
-    public async Task SaveSelectedCalendarIdsAsync(string sessionId, string[] calendarIds)
+    public async Task<IReadOnlyList<GoogleTaskList>> ListTaskListsAsync(string sessionId)
+    {
+        var token = await GetAccessTokenAsync(sessionId, requireTasksScope: true);
+        var lists = new List<GoogleTaskList>();
+        string? pageToken = null;
+        do
+        {
+            var query = new Dictionary<string, string?>
+            {
+                ["maxResults"] = "100",
+                ["pageToken"] = pageToken,
+            };
+            var uri = QueryHelpers.AddQueryString("https://tasks.googleapis.com/tasks/v1/users/@me/lists", query);
+            var result = await GetAsync<TaskListResponse>(uri, token);
+            lists.AddRange(result.Items ?? []);
+            pageToken = result.NextPageToken;
+        } while (!string.IsNullOrEmpty(pageToken));
+
+        return lists;
+    }
+
+    public async Task SaveSelectedTaskListIdsAsync(string sessionId, string settingsId, string[] taskListIds)
+    {
+        var availableIds = (await ListTaskListsAsync(sessionId))
+            .Select(taskList => taskList.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        if (taskListIds.Any(id => !availableIds.Contains(id)))
+            throw new GoogleApiException(
+                "A selected task list is not available to this Google account.",
+                HttpStatusCode.BadRequest);
+
+        await tokenStore.SaveSelectedTaskListIdsAsync(
+            settingsId,
+            taskListIds.Distinct(StringComparer.Ordinal).ToArray());
+    }
+
+    public async Task<IReadOnlyList<GoogleTask>> ListTasksAsync(string sessionId, string[] taskListIds)
+    {
+        var token = await GetAccessTokenAsync(sessionId, requireTasksScope: true);
+        var availableIds = (await ListTaskListsAsync(sessionId))
+            .Select(taskList => taskList.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        var requestedIds = taskListIds
+            .Distinct(StringComparer.Ordinal)
+            .Where(availableIds.Contains)
+            .ToArray();
+
+        var responses = await Task.WhenAll(requestedIds.Select(async taskListId =>
+        {
+            var tasks = new List<GoogleTask>();
+            string? pageToken = null;
+            do
+            {
+                var query = new Dictionary<string, string?>
+                {
+                    ["maxResults"] = "100",
+                    ["showCompleted"] = "true",
+                    ["showHidden"] = "true",
+                    ["pageToken"] = pageToken,
+                };
+                var uri = QueryHelpers.AddQueryString(
+                    $"https://tasks.googleapis.com/tasks/v1/lists/{Uri.EscapeDataString(taskListId)}/tasks",
+                    query);
+                var result = await GetAsync<TaskListItemsResponse>(uri, token);
+                tasks.AddRange((result.Items ?? [])
+                    .Where(item => item.Id is not null)
+                    .Select(item => new GoogleTask(
+                        item.Id!,
+                        taskListId,
+                        item.Title ?? "(Untitled task)",
+                        item.Notes,
+                        item.Due,
+                        item.Status == "completed")));
+                pageToken = result.NextPageToken;
+            } while (!string.IsNullOrEmpty(pageToken));
+
+            return tasks;
+        }));
+
+        return responses.SelectMany(response => response).ToArray();
+    }
+
+    public async Task SaveTaskAsync(string sessionId, GoogleTaskWriteRequest request)
+    {
+        var title = request.Title?.Trim();
+        if (string.IsNullOrEmpty(title) || title.Length > 1024)
+            throw new GoogleApiException("Enter a task title of 1 to 1024 characters.", HttpStatusCode.BadRequest);
+        if (string.IsNullOrWhiteSpace(request.TaskListId))
+            throw new GoogleApiException("Choose a task list.", HttpStatusCode.BadRequest);
+
+        string? due = null;
+        if (!string.IsNullOrWhiteSpace(request.DueDate))
+        {
+            if (!DateOnly.TryParseExact(request.DueDate, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var dueDate))
+                throw new GoogleApiException("Enter a valid task due date.", HttpStatusCode.BadRequest);
+            due = new DateTimeOffset(dueDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)).ToString("O", CultureInfo.InvariantCulture);
+        }
+
+        await EnsureTaskListAvailableAsync(sessionId, request.TaskListId);
+        var token = await GetAccessTokenAsync(sessionId, requireTasksScope: true);
+        var uri = $"https://tasks.googleapis.com/tasks/v1/lists/{Uri.EscapeDataString(request.TaskListId)}/tasks";
+        HttpMethod method = HttpMethod.Post;
+        if (!string.IsNullOrWhiteSpace(request.Id))
+        {
+            uri += $"/{Uri.EscapeDataString(request.Id)}";
+            method = HttpMethod.Patch;
+        }
+
+        await SendTaskMutationAsync(
+            uri,
+            method,
+            token,
+            new { title, notes = request.Notes, due });
+    }
+
+    public async Task SetTaskCompletedAsync(string sessionId, GoogleTaskCompletionRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.TaskListId) || string.IsNullOrWhiteSpace(request.TaskId))
+            throw new GoogleApiException("Choose a task to update.", HttpStatusCode.BadRequest);
+
+        await EnsureTaskListAvailableAsync(sessionId, request.TaskListId);
+        var token = await GetAccessTokenAsync(sessionId, requireTasksScope: true);
+        var uri = $"https://tasks.googleapis.com/tasks/v1/lists/{Uri.EscapeDataString(request.TaskListId)}/tasks/{Uri.EscapeDataString(request.TaskId)}";
+        await SendTaskMutationAsync(
+            uri,
+            HttpMethod.Patch,
+            token,
+            new { status = request.Completed ? "completed" : "needsAction" });
+    }
+
+    private async Task EnsureTaskListAvailableAsync(string sessionId, string taskListId)
+    {
+        if (!(await ListTaskListsAsync(sessionId)).Any(taskList => string.Equals(taskList.Id, taskListId, StringComparison.Ordinal)))
+            throw new GoogleApiException("This task list is not available to your Google account.", HttpStatusCode.BadRequest);
+    }
+
+    private async Task SendTaskMutationAsync(string uri, HttpMethod method, string accessToken, object payload)
+    {
+        using var request = new HttpRequestMessage(method, uri)
+        {
+            Content = JsonContent.Create(payload, options: JsonOptions),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using var response = await httpClient.SendAsync(request);
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadFromJsonAsync<GoogleErrorEnvelope>(JsonOptions);
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+                throw new GoogleSessionException("Google authorization expired. Please connect again.");
+            throw new GoogleApiException(
+                error?.Error?.Message ?? $"Google Tasks could not update the task ({(int)response.StatusCode}).",
+                response.StatusCode);
+        }
+    }
+
+    public async Task SaveSelectedCalendarIdsAsync(string sessionId, string settingsId, string[] calendarIds)
     {
         var availableIds = (await ListCalendarsAsync(sessionId))
             .Select(calendar => calendar.Id)
@@ -156,7 +359,7 @@ public sealed class GoogleCalendarApi(
                 HttpStatusCode.BadRequest);
 
         await tokenStore.SaveSelectedCalendarIdsAsync(
-            sessionId,
+            settingsId,
             calendarIds.Distinct(StringComparer.Ordinal).ToArray());
     }
 
@@ -317,7 +520,7 @@ public sealed class GoogleCalendarApi(
         }
     }
 
-    private async Task<string> GetAccessTokenAsync(string sessionId)
+    private async Task<string> GetAccessTokenAsync(string sessionId, bool requireTasksScope = false)
     {
         var record = await tokenStore.LoadAsync(sessionId);
         if (record is null)
@@ -326,6 +529,8 @@ public sealed class GoogleCalendarApi(
         if (!grantedScopes.Contains(GoogleOAuthSettings.CalendarEventsScope, StringComparer.Ordinal)
             || !grantedScopes.Contains(GoogleOAuthSettings.CalendarListScope, StringComparer.Ordinal))
             throw new GoogleSessionException("Google Calendar read and edit access is required. Please disconnect and reconnect, then approve both requested permissions.");
+        if (requireTasksScope && !grantedScopes.Contains(GoogleOAuthSettings.TasksScope, StringComparer.Ordinal))
+            throw new GoogleApiException("Google Tasks read and write access is required. Disconnect and reconnect, then approve the Google Tasks permission.", HttpStatusCode.Forbidden);
         if (record.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(1))
             return record.AccessToken;
         if (!settings.IsConfigured)
@@ -397,9 +602,40 @@ public sealed record CalendarEvent(
     string? Location,
     string? RecurringEventId = null);
 
+public sealed record GoogleTaskList(string Id, string Title);
+
+public sealed record GoogleTask(
+    string Id,
+    string TaskListId,
+    string Title,
+    string? Notes,
+    string? Due,
+    bool Completed);
+
 internal sealed class CalendarListResponse
 {
     public GoogleCalendar[]? Items { get; init; }
+}
+
+internal sealed class TaskListResponse
+{
+    public GoogleTaskList[]? Items { get; init; }
+    public string? NextPageToken { get; init; }
+}
+
+internal sealed class TaskListItemsResponse
+{
+    public GoogleTaskItem[]? Items { get; init; }
+    public string? NextPageToken { get; init; }
+}
+
+internal sealed class GoogleTaskItem
+{
+    public string? Id { get; init; }
+    public string? Title { get; init; }
+    public string? Notes { get; init; }
+    public string? Due { get; init; }
+    public string? Status { get; init; }
 }
 
 internal sealed class EventListResponse

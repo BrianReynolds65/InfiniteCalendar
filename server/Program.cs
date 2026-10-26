@@ -47,6 +47,28 @@ builder.Services.AddAuthorization();
 var app = builder.Build();
 var oauth = app.Services.GetRequiredService<GoogleOAuthSettings>();
 var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("GoogleOAuth");
+const string settingsCookieName = "Daybook.Settings";
+
+string GetSettingsId(HttpContext context, string sessionId)
+{
+    if (context.Request.Cookies.TryGetValue(settingsCookieName, out var settingsId)
+        && !string.IsNullOrWhiteSpace(settingsId))
+        return settingsId;
+
+    settingsId = sessionId;
+    context.Response.Cookies.Append(settingsCookieName, settingsId, new CookieOptions
+    {
+        HttpOnly = true,
+        IsEssential = true,
+        Path = "/",
+        SameSite = SameSiteMode.Lax,
+        Secure = builder.Environment.IsDevelopment()
+            ? context.Request.IsHttps
+            : true,
+        Expires = DateTimeOffset.UtcNow.AddYears(5),
+    });
+    return settingsId;
+}
 
 app.Use(async (context, next) =>
 {
@@ -58,16 +80,22 @@ app.Use(async (context, next) =>
     {
         var sessionId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (sessionId is not null)
-            await context.RequestServices.GetRequiredService<GoogleTokenStore>().DeleteAsync(sessionId);
+        {
+            GetSettingsId(context, sessionId);
+            await context.RequestServices.GetRequiredService<GoogleTokenStore>().DeleteTokenAsync(sessionId);
+        }
         await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         await context.Response.WriteAsJsonAsync(new { error = exception.Message });
     }
     catch (GoogleApiException exception)
     {
-        context.Response.StatusCode = exception.StatusCode == System.Net.HttpStatusCode.BadRequest
-            ? StatusCodes.Status400BadRequest
-            : StatusCodes.Status502BadGateway;
+        context.Response.StatusCode = exception.StatusCode switch
+        {
+            System.Net.HttpStatusCode.BadRequest => StatusCodes.Status400BadRequest,
+            System.Net.HttpStatusCode.Forbidden => StatusCodes.Status403Forbidden,
+            _ => StatusCodes.Status502BadGateway,
+        };
         await context.Response.WriteAsJsonAsync(new { error = exception.Message });
     }
 });
@@ -100,7 +128,7 @@ app.MapGet("/auth/google", (HttpContext context) =>
         ["client_id"] = oauth.ClientId,
         ["redirect_uri"] = oauth.CallbackUri,
         ["response_type"] = "code",
-        ["scope"] = GoogleOAuthSettings.CalendarScopes,
+        ["scope"] = GoogleOAuthSettings.OAuthScopes,
         ["access_type"] = "offline",
         ["prompt"] = "consent",
         ["state"] = state,
@@ -160,11 +188,12 @@ app.MapGet("/auth/callback", async (
     }
 
     var sessionId = GoogleOAuthSettings.RandomUrlToken(32);
+    GetSettingsId(context, sessionId);
     await tokenStore.SaveAsync(sessionId, new GoogleTokenRecord(
         tokenResponse.AccessToken,
         tokenResponse.RefreshToken,
         DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn),
-        tokenResponse.Scope ?? GoogleOAuthSettings.CalendarScopes));
+        tokenResponse.Scope ?? GoogleOAuthSettings.OAuthScopes));
 
     var claims = new[] { new Claim(ClaimTypes.NameIdentifier, sessionId) };
     var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
@@ -195,10 +224,11 @@ app.MapGet("/api/calendars", async (ClaimsPrincipal user, GoogleCalendarApi cale
     return Results.Ok(await calendarApi.ListCalendarsAsync(sessionId));
 }).RequireAuthorization();
 
-app.MapGet("/api/calendar-selection", async (ClaimsPrincipal user, GoogleTokenStore tokenStore) =>
+app.MapGet("/api/calendar-selection", async (HttpContext context, ClaimsPrincipal user, GoogleTokenStore tokenStore) =>
 {
     var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
-    return Results.Ok(new { calendarIds = await tokenStore.GetSelectedCalendarIdsAsync(sessionId) });
+    var settingsId = GetSettingsId(context, sessionId);
+    return Results.Ok(new { calendarIds = await tokenStore.GetSelectedCalendarIdsAsync(settingsId) });
 }).RequireAuthorization();
 
 app.MapPut("/api/calendar-selection", async (
@@ -214,7 +244,98 @@ app.MapPut("/api/calendar-selection", async (
         return Results.BadRequest(new { error = "Select no more than 250 calendars." });
 
     var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
-    await calendarApi.SaveSelectedCalendarIdsAsync(sessionId, request.CalendarIds);
+    var settingsId = GetSettingsId(context, sessionId);
+    await calendarApi.SaveSelectedCalendarIdsAsync(sessionId, settingsId, request.CalendarIds);
+    return Results.NoContent();
+}).RequireAuthorization();
+
+app.MapGet("/api/tasklists", async (ClaimsPrincipal user, GoogleCalendarApi calendarApi) =>
+{
+    var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
+    return Results.Ok(await calendarApi.ListTaskListsAsync(sessionId));
+}).RequireAuthorization();
+
+app.MapGet("/api/tasklist-selection", async (HttpContext context, ClaimsPrincipal user, GoogleTokenStore tokenStore) =>
+{
+    var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
+    var settingsId = GetSettingsId(context, sessionId);
+    return Results.Ok(new { taskListIds = await tokenStore.GetSelectedTaskListIdsAsync(settingsId) });
+}).RequireAuthorization();
+
+app.MapPut("/api/tasklist-selection", async (
+    HttpContext context,
+    ClaimsPrincipal user,
+    GoogleCalendarApi calendarApi,
+    SaveTaskListSelectionRequest request) =>
+{
+    if (!Uri.TryCreate(context.Request.Headers.Origin, UriKind.Absolute, out var origin)
+        || !string.Equals(origin.GetLeftPart(UriPartial.Authority), oauth.FrontendOrigin, StringComparison.OrdinalIgnoreCase))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+    if (request.TaskListIds is null || request.TaskListIds.Length > 100)
+        return Results.BadRequest(new { error = "Select no more than 100 task lists." });
+
+    var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
+    var settingsId = GetSettingsId(context, sessionId);
+    await calendarApi.SaveSelectedTaskListIdsAsync(sessionId, settingsId, request.TaskListIds);
+    return Results.NoContent();
+}).RequireAuthorization();
+
+app.MapGet("/api/tasks", async (
+    ClaimsPrincipal user,
+    GoogleCalendarApi calendarApi,
+    string[] taskListIds) =>
+{
+    if (taskListIds.Length > 100)
+        return Results.BadRequest(new { error = "Select no more than 100 task lists." });
+
+    var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
+    return Results.Ok(await calendarApi.ListTasksAsync(sessionId, taskListIds));
+}).RequireAuthorization();
+
+app.MapPost("/api/tasks/create", async (
+    HttpContext context,
+    ClaimsPrincipal user,
+    GoogleCalendarApi calendarApi,
+    GoogleTaskWriteRequest request) =>
+{
+    if (!Uri.TryCreate(context.Request.Headers.Origin, UriKind.Absolute, out var origin)
+        || !string.Equals(origin.GetLeftPart(UriPartial.Authority), oauth.FrontendOrigin, StringComparison.OrdinalIgnoreCase))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
+    await calendarApi.SaveTaskAsync(sessionId, request with { Id = null });
+    return Results.NoContent();
+}).RequireAuthorization();
+
+app.MapPost("/api/tasks/update", async (
+    HttpContext context,
+    ClaimsPrincipal user,
+    GoogleCalendarApi calendarApi,
+    GoogleTaskWriteRequest request) =>
+{
+    if (!Uri.TryCreate(context.Request.Headers.Origin, UriKind.Absolute, out var origin)
+        || !string.Equals(origin.GetLeftPart(UriPartial.Authority), oauth.FrontendOrigin, StringComparison.OrdinalIgnoreCase))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+    if (string.IsNullOrWhiteSpace(request.Id))
+        return Results.BadRequest(new { error = "Choose a task to update." });
+
+    var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
+    await calendarApi.SaveTaskAsync(sessionId, request);
+    return Results.NoContent();
+}).RequireAuthorization();
+
+app.MapPost("/api/tasks/complete", async (
+    HttpContext context,
+    ClaimsPrincipal user,
+    GoogleCalendarApi calendarApi,
+    GoogleTaskCompletionRequest request) =>
+{
+    if (!Uri.TryCreate(context.Request.Headers.Origin, UriKind.Absolute, out var origin)
+        || !string.Equals(origin.GetLeftPart(UriPartial.Authority), oauth.FrontendOrigin, StringComparison.OrdinalIgnoreCase))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    var sessionId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
+    await calendarApi.SetTaskCompletedAsync(sessionId, request);
     return Results.NoContent();
 }).RequireAuthorization();
 
@@ -273,13 +394,18 @@ app.MapPost("/auth/logout", async (HttpContext context, GoogleTokenStore tokenSt
 
     var sessionId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
     if (sessionId is not null)
+    {
         await tokenStore.DeleteAsync(sessionId);
+        await tokenStore.DeleteSelectionsAsync(GetSettingsId(context, sessionId));
+    }
     await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+    context.Response.Cookies.Delete(settingsCookieName, new CookieOptions { Path = "/" });
     return Results.NoContent();
 }).RequireAuthorization();
 
 app.Run();
 
 public sealed record SaveCalendarSelectionRequest(string[] CalendarIds);
+public sealed record SaveTaskListSelectionRequest(string[] TaskListIds);
 
 public partial class Program;

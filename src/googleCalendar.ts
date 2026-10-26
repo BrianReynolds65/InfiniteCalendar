@@ -5,6 +5,28 @@ export type GoogleCalendar = {
   primary?: boolean
 }
 
+export type GoogleTaskList = {
+  id: string
+  title: string
+}
+
+export type GoogleTask = {
+  id: string
+  taskListId: string
+  title: string
+  notes?: string
+  due?: string
+  completed: boolean
+}
+
+export type GoogleTaskInput = {
+  id?: string
+  taskListId: string
+  title: string
+  notes: string
+  dueDate: string
+}
+
 export type CalendarEvent = {
   id: string
   calendarId: string
@@ -35,6 +57,9 @@ async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
   if (response.status === 401) {
     window.dispatchEvent(new Event('google-session-expired'))
     throw new Error('Google authorization expired. Please connect again.')
+  }
+  if (response.status === 404) {
+    throw new Error(`The backend does not recognize ${path}. Restart the backend to load the latest API endpoints.`)
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { error?: string; detail?: string; title?: string }
@@ -72,6 +97,50 @@ export function saveCalendarSelection(calendarIds: string[]): Promise<void> {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ calendarIds }),
+  })
+}
+
+export function listGoogleTaskLists(): Promise<GoogleTaskList[]> {
+  return apiRequest<GoogleTaskList[]>('/api/tasklists')
+}
+
+export function getTaskListSelection(): Promise<{ taskListIds: string[] | null }> {
+  return apiRequest<{ taskListIds: string[] | null }>('/api/tasklist-selection')
+}
+
+export function saveTaskListSelection(taskListIds: string[]): Promise<void> {
+  return apiRequest<void>('/api/tasklist-selection', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskListIds }),
+  })
+}
+
+export function listGoogleTasks(taskListIds: string[]): Promise<GoogleTask[]> {
+  if (taskListIds.length === 0) return Promise.resolve([])
+  const query = new URLSearchParams()
+  taskListIds.forEach((id) => query.append('taskListIds', id))
+  return apiRequest<GoogleTask[]>(`/api/tasks?${query}`)
+}
+
+export function saveGoogleTask(task: GoogleTaskInput): Promise<void> {
+  const isUpdate = Boolean(task.id)
+  return apiRequest<void>(`/api/tasks/${isUpdate ? 'update' : 'create'}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(task),
+  })
+}
+
+export function setGoogleTaskCompleted(task: GoogleTask, completed: boolean): Promise<void> {
+  return apiRequest<void>('/api/tasks/complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      taskListId: task.taskListId,
+      taskId: task.id,
+      completed,
+    }),
   })
 }
 

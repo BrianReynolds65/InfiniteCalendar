@@ -1,0 +1,60 @@
+@baseUrl = http://localhost:5080
+@sessionCookie = REPLACE_WITH_DAYBOOK_SESSION_COOKIE
+@taskListId = REPLACE_WITH_GOOGLE_TASK_LIST_ID
+
+### List Google task lists
+GET {{baseUrl}}/api/tasklists
+Cookie: Daybook.Session={{sessionCookie}}
+
+### Read saved task-list selection
+GET {{baseUrl}}/api/tasklist-selection
+Cookie: Daybook.Session={{sessionCookie}}
+
+### Save task-list selection
+PUT {{baseUrl}}/api/tasklist-selection
+Cookie: Daybook.Session={{sessionCookie}}
+Content-Type: application/json
+
+{
+  "taskListIds": ["{{taskListId}}"]
+}
+
+### List tasks from a selected task list
+GET {{baseUrl}}/api/tasks?taskListIds={{taskListId}}
+Cookie: Daybook.Session={{sessionCookie}}
+
+### Create a task
+POST {{baseUrl}}/api/tasks/create
+Cookie: Daybook.Session={{sessionCookie}}
+Content-Type: application/json
+
+{
+  "taskListId": "{{taskListId}}",
+  "title": "Review project notes",
+  "notes": "Capture follow-up actions",
+  "dueDate": "2026-11-01"
+}
+
+### Update a task
+POST {{baseUrl}}/api/tasks/update
+Cookie: Daybook.Session={{sessionCookie}}
+Content-Type: application/json
+
+{
+  "id": "REPLACE_WITH_TASK_ID",
+  "taskListId": "{{taskListId}}",
+  "title": "Review updated project notes",
+  "notes": "Capture and assign follow-up actions",
+  "dueDate": "2026-11-02"
+}
+
+### Complete or reopen a task
+POST {{baseUrl}}/api/tasks/complete
+Cookie: Daybook.Session={{sessionCookie}}
+Content-Type: application/json
+
+{
+  "taskListId": "{{taskListId}}",
+  "taskId": "REPLACE_WITH_TASK_ID",
+  "completed": true
+}

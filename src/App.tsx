@@ -9,6 +9,7 @@ import {
   Clock3,
   ExternalLink,
   LoaderCircle,
+  ListTodo,
   Plus,
   RefreshCw,
   Settings2,
@@ -17,17 +18,26 @@ import {
 } from 'lucide-react'
 import {
   getCalendarSelection,
+  getTaskListSelection,
   getGoogleSession,
   deleteCalendarEvent,
   listCalendarEvents,
+  listGoogleTaskLists,
+  listGoogleTasks,
   listGoogleCalendars,
   logoutGoogle,
   saveCalendarEvent,
   saveCalendarSelection,
+  saveGoogleTask,
+  saveTaskListSelection,
+  setGoogleTaskCompleted,
   startGoogleSignIn,
   type CalendarEvent,
   type CalendarEventInput,
   type GoogleCalendar,
+  type GoogleTask,
+  type GoogleTaskList,
+  type GoogleTaskInput,
 } from './googleCalendar'
 
 const WEEKS_PER_EXTENSION = 8
@@ -82,6 +92,14 @@ function localTime(value: string): string {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
+function formatTaskDue(value: string): string {
+  const datePart = /^\d{4}-\d{2}-\d{2}/.exec(value)?.[0]
+  const due = datePart ? new Date(`${datePart}T00:00:00`) : new Date(value)
+  return Number.isNaN(due.getTime())
+    ? ''
+    : `Due ${new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(due)}`
+}
+
 type EventDraft = {
   id?: string
   calendarId: string
@@ -92,6 +110,14 @@ type EventDraft = {
   startTime: string
   endTime: string
   recurringEventId?: string
+}
+
+type TaskDraft = {
+  id?: string
+  taskListId: string
+  title: string
+  notes: string
+  dueDate: string
 }
 
 type EventDragState = {
@@ -139,6 +165,12 @@ function App() {
   const [calendars, setCalendars] = useState<GoogleCalendar[]>([])
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [events, setEvents] = useState<CalendarEvent[]>([])
+  const [taskLists, setTaskLists] = useState<GoogleTaskList[]>([])
+  const [selectedTaskListIds, setSelectedTaskListIds] = useState<string[]>([])
+  const [tasks, setTasks] = useState<GoogleTask[]>([])
+  const [taskDraft, setTaskDraft] = useState<TaskDraft | null>(null)
+  const [savingTask, setSavingTask] = useState(false)
+  const [updatingTaskIds, setUpdatingTaskIds] = useState<string[]>([])
   const [connected, setConnected] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [eventDraft, setEventDraft] = useState<EventDraft | null>(null)
@@ -147,9 +179,14 @@ function App() {
   const [movingEvent, setMovingEvent] = useState<{ eventId: string; targetDayKey: string } | null>(null)
   const [savingEvent, setSavingEvent] = useState(false)
   const [calendarMenuOpen, setCalendarMenuOpen] = useState(false)
+  const [taskListMenuOpen, setTaskListMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [loadingEvents, setLoadingEvents] = useState(false)
+  const [loadingTasks, setLoadingTasks] = useState(false)
+  const [loadingTaskLists, setLoadingTaskLists] = useState(false)
   const [refreshRequest, setRefreshRequest] = useState(0)
+  const [taskRefreshRequest, setTaskRefreshRequest] = useState(0)
+  const [taskError, setTaskError] = useState('')
   const [error, setError] = useState('')
   const [visibleMonth, setVisibleMonth] = useState(() => new Date())
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -159,12 +196,19 @@ function App() {
   const previousScrollHeight = useRef(0)
   const pendingPrepend = useRef(false)
   const selectionSaveRef = useRef<Promise<void>>(Promise.resolve())
+  const taskSelectionSaveRef = useRef<Promise<void>>(Promise.resolve())
+  const selectedTaskListIdsRef = useRef<string[]>([])
   const activeEventDragRef = useRef<ActiveEventDrag | null>(null)
   const suppressEventClickRef = useRef<string | null>(null)
+  selectedTaskListIdsRef.current = selectedTaskListIds
 
   const selectedCalendars = useMemo(
     () => calendars.filter(({ id }) => selectedIds.includes(id)),
     [calendars, selectedIds],
+  )
+  const selectedTaskLists = useMemo(
+    () => taskLists.filter(({ id }) => selectedTaskListIds.includes(id)),
+    [selectedTaskListIds, taskLists],
   )
   const firstWeek = weeks[0]?.getTime() ?? 0
   const lastWeek = weeks[weeks.length - 1]?.getTime() ?? 0
@@ -208,6 +252,10 @@ function App() {
       setCalendars([])
       setSelectedIds([])
       setEvents([])
+      setTaskLists([])
+      setSelectedTaskListIds([])
+      setTasks([])
+      setTaskError('')
     }
     window.addEventListener('google-session-expired', expireSession)
     return () => {
@@ -287,6 +335,110 @@ function App() {
       if (pollTimer !== undefined) window.clearTimeout(pollTimer)
     }
   }, [connected, firstWeek, lastWeek, refreshRequest, selectedIds])
+
+  useEffect(() => {
+    if (!connected) {
+      setTaskLists([])
+      setSelectedTaskListIds([])
+      setTasks([])
+      setTaskError('')
+      setLoadingTaskLists(false)
+      return
+    }
+
+    let cancelled = false
+    let pollTimer: number | undefined
+    const refreshTaskLists = async (restoreSelection: boolean) => {
+      if (restoreSelection) setLoadingTaskLists(true)
+      try {
+        const availableTaskLists = await listGoogleTaskLists()
+        if (cancelled) return
+        const availableIds = new Set(availableTaskLists.map(({ id }) => id))
+        setTaskLists(availableTaskLists)
+
+        if (restoreSelection) {
+          const savedSelection = await getTaskListSelection()
+          if (cancelled) return
+          setTaskError('')
+          const selectedIds = savedSelection.taskListIds === null
+            ? availableTaskLists.map(({ id }) => id)
+            : savedSelection.taskListIds.filter((id) => availableIds.has(id))
+          selectedTaskListIdsRef.current = selectedIds
+          setSelectedTaskListIds(selectedIds)
+          if (savedSelection.taskListIds !== null && selectedIds.length !== savedSelection.taskListIds.length) {
+            taskSelectionSaveRef.current = taskSelectionSaveRef.current
+              .catch(() => undefined)
+              .then(() => saveTaskListSelection(selectedIds))
+              .catch((saveError: unknown) => {
+                setTaskError(saveError instanceof Error ? saveError.message : 'Could not update the saved task-list selection.')
+              })
+          }
+        } else {
+          const currentIds = selectedTaskListIdsRef.current
+          const selectedIds = currentIds.filter((id) => availableIds.has(id))
+          if (selectedIds.length !== currentIds.length) {
+            selectedTaskListIdsRef.current = selectedIds
+            setSelectedTaskListIds(selectedIds)
+            taskSelectionSaveRef.current = taskSelectionSaveRef.current
+              .catch(() => undefined)
+              .then(() => saveTaskListSelection(selectedIds))
+              .catch((saveError: unknown) => {
+                setTaskError(saveError instanceof Error ? saveError.message : 'Could not update the saved task-list selection.')
+              })
+          }
+        }
+      } catch (taskListError: unknown) {
+        if (!cancelled) setTaskError(taskListError instanceof Error ? taskListError.message : 'Could not load Google task lists.')
+      } finally {
+        if (!cancelled) {
+          setLoadingTaskLists(false)
+          pollTimer = window.setTimeout(() => void refreshTaskLists(false), EVENT_POLL_INTERVAL_MS)
+        }
+      }
+    }
+
+    void refreshTaskLists(true)
+    return () => {
+      cancelled = true
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer)
+    }
+  }, [connected])
+
+  useEffect(() => {
+    if (!connected || selectedTaskListIds.length === 0) {
+      setTasks([])
+      setLoadingTasks(false)
+      return
+    }
+
+    let cancelled = false
+    let initialLoad = true
+    let pollTimer: number | undefined
+    const refreshTasks = async () => {
+      if (initialLoad) setLoadingTasks(true)
+      try {
+        const nextTasks = await listGoogleTasks(selectedTaskListIds)
+        if (!cancelled) {
+          setTasks(nextTasks)
+          setTaskError('')
+        }
+      } catch (taskError: unknown) {
+        if (!cancelled) setTaskError(taskError instanceof Error ? taskError.message : 'Could not load Google tasks.')
+      } finally {
+        if (!cancelled) {
+          setLoadingTasks(false)
+          initialLoad = false
+          pollTimer = window.setTimeout(() => void refreshTasks(), EVENT_POLL_INTERVAL_MS)
+        }
+      }
+    }
+
+    void refreshTasks()
+    return () => {
+      cancelled = true
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer)
+    }
+  }, [connected, selectedTaskListIds, taskRefreshRequest])
 
   useEffect(() => {
     const container = scrollRef.current
@@ -379,7 +531,12 @@ function App() {
     setCalendars([])
     setSelectedIds([])
     setEvents([])
+    setTaskLists([])
+    setSelectedTaskListIds([])
+    setTasks([])
+    setTaskError('')
     setCalendarMenuOpen(false)
+    setTaskListMenuOpen(false)
   }
 
   function toggleCalendar(id: string) {
@@ -394,6 +551,78 @@ function App() {
         .catch((saveError: unknown) => {
           setError(saveError instanceof Error ? saveError.message : 'Could not save calendar selection.')
         })
+    }
+  }
+
+  function toggleTaskList(id: string) {
+    const nextIds = selectedTaskListIds.includes(id)
+      ? selectedTaskListIds.filter((selectedId) => selectedId !== id)
+      : [...selectedTaskListIds, id]
+    setSelectedTaskListIds(nextIds)
+    if (connected) {
+      taskSelectionSaveRef.current = taskSelectionSaveRef.current
+        .catch(() => undefined)
+        .then(() => saveTaskListSelection(nextIds))
+        .catch((saveError: unknown) => {
+          setError(saveError instanceof Error ? saveError.message : 'Could not save task-list selection.')
+        })
+    }
+  }
+
+  function openNewTask(taskListId: string) {
+    setTaskError('')
+    setTaskDraft({ taskListId, title: '', notes: '', dueDate: '' })
+  }
+
+  function openEditTask(task: GoogleTask) {
+    setTaskError('')
+    setTaskDraft({
+      id: task.id,
+      taskListId: task.taskListId,
+      title: task.title,
+      notes: task.notes ?? '',
+      dueDate: /^\d{4}-\d{2}-\d{2}/.exec(task.due ?? '')?.[0] ?? '',
+    })
+  }
+
+  async function submitTask(formEvent: FormEvent<HTMLFormElement>) {
+    formEvent.preventDefault()
+    if (!taskDraft) return
+    const input: GoogleTaskInput = {
+      id: taskDraft.id,
+      taskListId: taskDraft.taskListId,
+      title: taskDraft.title.trim(),
+      notes: taskDraft.notes.trim(),
+      dueDate: taskDraft.dueDate,
+    }
+    if (!input.title) {
+      setTaskError('Enter a task title.')
+      return
+    }
+
+    setSavingTask(true)
+    setTaskError('')
+    try {
+      await saveGoogleTask(input)
+      setTaskDraft(null)
+      setTaskRefreshRequest((request) => request + 1)
+    } catch (saveError: unknown) {
+      setTaskError(saveError instanceof Error ? saveError.message : 'Could not save the task.')
+    } finally {
+      setSavingTask(false)
+    }
+  }
+
+  async function toggleTaskCompleted(task: GoogleTask) {
+    setUpdatingTaskIds((ids) => [...ids, task.id])
+    setTaskError('')
+    try {
+      await setGoogleTaskCompleted(task, !task.completed)
+      setTaskRefreshRequest((request) => request + 1)
+    } catch (updateError: unknown) {
+      setTaskError(updateError instanceof Error ? updateError.message : 'Could not update the task.')
+    } finally {
+      setUpdatingTaskIds((ids) => ids.filter((id) => id !== task.id))
     }
   }
 
@@ -850,6 +1079,198 @@ function App() {
         </footer>
       </section>
 
+      <section className="tasks-panel" aria-labelledby="tasks-heading">
+        <div className="tasks-panel-header">
+          <div className="tasks-heading">
+            <ListTodo size={18} />
+            <h2 id="tasks-heading">Google Tasks</h2>
+          </div>
+          <div className="tasks-panel-actions">
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Refresh tasks"
+              title="Refresh tasks"
+              disabled={!connected || loadingTasks || selectedTaskListIds.length === 0}
+              onClick={() => setTaskRefreshRequest((request) => request + 1)}
+            >
+              {loadingTasks ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}
+            </button>
+            <div className="task-list-picker-wrap">
+              <button
+                className="button button-outline task-list-picker"
+                type="button"
+                aria-expanded={taskListMenuOpen}
+                onClick={() => setTaskListMenuOpen((open) => !open)}
+                disabled={!connected || loadingTaskLists || taskLists.length === 0}
+              >
+                Task lists <span className="selection-count">{selectedTaskListIds.length}</span>
+                <ChevronDown size={15} />
+              </button>
+              {taskListMenuOpen && (
+                <div className="task-list-menu">
+                  <div className="menu-heading">Show task lists</div>
+                  {taskLists.map((taskList) => (
+                    <button
+                      className="calendar-option"
+                      type="button"
+                      key={taskList.id}
+                      onClick={() => toggleTaskList(taskList.id)}
+                    >
+                      <span className="calendar-name">{taskList.title}</span>
+                      <span className={`checkmark ${selectedTaskListIds.includes(taskList.id) ? 'checked' : ''}`}>
+                        {selectedTaskListIds.includes(taskList.id) && <Check size={13} />}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="tasks-panel-content">
+          {!connected ? (
+            <p className="tasks-empty">Connect Google Calendar to see your Google Tasks.</p>
+          ) : taskError ? (
+            <p className="tasks-empty task-error" role="alert">{taskError}</p>
+          ) : loadingTaskLists && taskLists.length === 0 ? (
+            <p className="tasks-empty"><LoaderCircle className="spin" size={15} /> Loading task lists…</p>
+          ) : taskLists.length === 0 ? (
+            <p className="tasks-empty">No Google task lists found.</p>
+          ) : selectedTaskLists.length === 0 ? (
+            <p className="tasks-empty">Choose task lists to display.</p>
+          ) : loadingTasks && tasks.length === 0 ? (
+            <p className="tasks-empty"><LoaderCircle className="spin" size={15} /> Loading tasks…</p>
+          ) : (
+            <div className="task-list-columns">
+              {selectedTaskLists.map((taskList) => {
+                const listTasks = tasks.filter((task) => task.taskListId === taskList.id)
+                const activeTasks = listTasks.filter((task) => !task.completed)
+                const completedTasks = listTasks.filter((task) => task.completed)
+                const renderTask = (task: GoogleTask) => (
+                  <li className={task.completed ? 'is-completed' : ''} key={task.id}>
+                    <button
+                      className="task-status-mark"
+                      type="button"
+                      disabled={updatingTaskIds.includes(task.id)}
+                      aria-label={task.completed ? `Reopen ${task.title}` : `Complete ${task.title}`}
+                      title={task.completed ? 'Reopen task' : 'Complete task'}
+                      onClick={() => void toggleTaskCompleted(task)}
+                    >
+                      {updatingTaskIds.includes(task.id)
+                        ? <LoaderCircle className="spin" size={12} />
+                        : task.completed ? <Check size={12} /> : null}
+                    </button>
+                    <div className="task-copy">
+                      <button className="task-title-button" type="button" onClick={() => openEditTask(task)}>
+                        <span className="task-title">{task.title}</span>
+                      </button>
+                      {task.notes && <span className="task-notes">{task.notes}</span>}
+                      {task.due && <span className="task-due">{formatTaskDue(task.due)}</span>}
+                    </div>
+                  </li>
+                )
+                return (
+                  <section className="task-list-column" key={taskList.id} aria-label={taskList.title}>
+                    <div className="task-list-title-row">
+                      <h3>{taskList.title}</h3>
+                      <button
+                        className="task-add-button"
+                        type="button"
+                        onClick={() => openNewTask(taskList.id)}
+                        aria-label={`Add task to ${taskList.title}`}
+                        title="Add task"
+                      >
+                        <Plus size={15} />
+                      </button>
+                    </div>
+                    {listTasks.length === 0 ? (
+                      <p className="task-list-empty">No tasks</p>
+                    ) : (
+                      <div className="task-list-items">
+                        {activeTasks.length > 0 && <ul>{activeTasks.map(renderTask)}</ul>}
+                        {completedTasks.length > 0 && (
+                          <details className="completed-task-section">
+                            <summary>
+                              <span>Completed</span>
+                              <span className="completed-task-count">{completedTasks.length}</span>
+                              <ChevronDown size={14} />
+                            </summary>
+                            <ul>{completedTasks.map(renderTask)}</ul>
+                          </details>
+                        )}
+                      </div>
+                    )}
+                  </section>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {taskDraft && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !savingTask) setTaskDraft(null)
+          }}
+        >
+          <form
+            className="settings-dialog task-editor-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="task-editor-title"
+            onSubmit={(formEvent) => void submitTask(formEvent)}
+          >
+            <div className="dialog-heading">
+              <div>
+                <span className="eyebrow">{taskLists.find(({ id }) => id === taskDraft.taskListId)?.title ?? 'GOOGLE TASKS'}</span>
+                <h2 id="task-editor-title">{taskDraft.id ? 'Edit task' : 'New task'}</h2>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setTaskDraft(null)} aria-label="Close task editor" disabled={savingTask}>
+                <X size={18} />
+              </button>
+            </div>
+            {taskError && <p className="dialog-error" role="alert">{taskError}</p>}
+            <label className="field-label" htmlFor="task-title">Task</label>
+            <input
+              id="task-title"
+              className="text-input"
+              value={taskDraft.title}
+              onChange={(changeEvent) => setTaskDraft((current) => current ? { ...current, title: changeEvent.target.value } : current)}
+              maxLength={1024}
+              required
+              autoFocus
+            />
+            <label className="field-label task-notes-label" htmlFor="task-notes">Notes</label>
+            <textarea
+              id="task-notes"
+              className="text-input task-notes-input"
+              value={taskDraft.notes}
+              onChange={(changeEvent) => setTaskDraft((current) => current ? { ...current, notes: changeEvent.target.value } : current)}
+              maxLength={8192}
+              rows={3}
+            />
+            <label className="field-label task-due-label" htmlFor="task-due-date">Due date</label>
+            <input
+              id="task-due-date"
+              className="text-input"
+              type="date"
+              value={taskDraft.dueDate}
+              onChange={(changeEvent) => setTaskDraft((current) => current ? { ...current, dueDate: changeEvent.target.value } : current)}
+            />
+            <div className="dialog-actions">
+              <button className="button button-outline" type="button" onClick={() => setTaskDraft(null)} disabled={savingTask}>Cancel</button>
+              <button className="button button-dark" type="submit" disabled={savingTask}>
+                {savingTask ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+                {taskDraft.id ? 'Save changes' : 'Create task'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {eventDrag && draggedEvent && (
         <div
           className="event-drag-ghost"
@@ -882,7 +1303,7 @@ function App() {
               <button className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="Close settings"><X size={18} /></button>
             </div>
             <p className="dialog-copy">Connect securely through the calendar backend. Google refresh tokens stay on the server and are never stored in this browser.</p>
-            <div className="setup-note"><Clock3 size={16} /><span>The backend needs a Google OAuth Web application client ID and secret. Add the Vite origin and <code>http://localhost:5173/auth/callback</code> as an authorized redirect URI.</span></div>
+            <div className="setup-note"><Clock3 size={16} /><span>The backend needs a Google OAuth Web application client ID and secret. Add this site's origin and <code>{window.location.origin}/auth/callback</code> as an authorized redirect URI.</span></div>
             <a className="console-link" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">Open Google Cloud credentials <ExternalLink size={14} /></a>
             <div className="dialog-actions">
               <button className="button button-outline" onClick={() => setSettingsOpen(false)}>Cancel</button>

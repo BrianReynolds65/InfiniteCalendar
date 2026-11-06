@@ -40,7 +40,7 @@ If Google shows **“Access blocked”**, check that the signed-in account is an
 
 Google may expire refresh tokens after seven days when an External OAuth app remains in Testing and requests non-basic scopes such as Calendar read access. The backend cannot override that policy; publish the app and complete any required verification for longer-lived access.
 
-## Sessions and deployment
+## Sessions and initial deployment
 
 The backend stores Google refresh tokens, calendar selections, and task-list selections encrypted with ASP.NET Core Data Protection. A persistent, HTTP-only browser cookie keeps selections associated with the browser independently of the Google authorization session, so they are restored after backend restarts and Google reauthorization. Disconnecting explicitly clears the session and its saved selections. The backend's data directory defaults to `%LOCALAPPDATA%\InfiniteCalendar` on Windows (or the operating system's local application-data directory), containing both the encrypted sessions and Data Protection keys. Restrict access to this directory and preserve it across backend restarts, or users will need to connect again.
 
@@ -159,8 +159,23 @@ The app requests `calendar.events` to read, edit, and delete events, `calendar.c
 
 The site includes a web app manifest and can be installed from Chrome as a standalone app. After deploying the latest frontend over HTTPS, remove any existing home-screen shortcut, open the site in Chrome, choose **Install app** from the menu, then launch it from the new app icon. Android's system status/navigation bars may still appear. Use Android app pinning or managed-device lock task mode if the tablet should stay in the calendar.
 
-## Build
+## Ongoing deployment
 
+If deploying the ui, build it first
 ```sh
 npm run build
+```
+The backend is built inside the deployed docker environment.
+Copy all of the source files over to the linux server. First change to the root of the project, then run the following command to copy all of the source over to a staging folder on the docker server.
+```sh
+scp -r .\server .\docker-compose.yml .\.env.example .\dist brian@docker-host:infinitecalendar-upload/
+```
+Now, on the destination server, copy the files to their proper destination. This can be done in a putty session, or on the server itself. In the home directory, run the following:
+```sh
+sudo cp -a ~/infinitecalendar-upload/. /opt/infinitecalendar/
+```
+The UI is served directly out of /opt/infinitecalendar/dist by the reverse proxy.
+To build and run the backend, just execute the following command on the server:
+```sh
+docker compose up -d --build api
 ```

@@ -205,6 +205,8 @@ function App() {
   const [updatingTaskIds, setUpdatingTaskIds] = useState<string[]>([])
   const [connected, setConnected] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [noteOpen, setNoteOpen] = useState(false)
+  const [noteText, setNoteText] = useState('')
   const [eventDraft, setEventDraft] = useState<EventDraft | null>(null)
   const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false)
   const [eventDrag, setEventDrag] = useState<EventDragState | null>(null)
@@ -533,14 +535,18 @@ function App() {
   }, [events, selectedIds])
 
   const multiDaySpansByWeek = useMemo(() => {
-    const spansByWeek = new Map<number, Array<{
-      event: CalendarEvent
-      startColumn: number
-      endColumn: number
-      startPosition: number
-      endPosition: number
-      lane: number
-    }>>()
+    const spansByWeek = new Map<number, {
+      spans: Array<{
+        event: CalendarEvent
+        startColumn: number
+        endColumn: number
+        startPosition: number
+        endPosition: number
+        lane: number
+      }>
+      allDayEventsByDay: Map<number, Array<{ event: CalendarEvent; lane: number }>>
+      allDayLaneCount: number
+    }>()
 
     for (const week of weeks) {
       const weekStart = dayNumber(dateKey(week))
@@ -559,29 +565,102 @@ function App() {
           endPosition: event.allDay
             ? Math.min(eventEnd, weekEnd)
             : Math.min(dayPosition(event.end), weekEnd),
-          duration: eventEnd - eventStart,
         }]
-      }).sort((a, b) => b.duration - a.duration || a.startColumn - b.startColumn || a.endColumn - b.endColumn)
-
-      const laneEndColumns: number[] = []
-      const spans = segments.map((segment) => {
-        let lane = laneEndColumns.findIndex((endColumn) => endColumn <= segment.startColumn)
-        if (lane < 0) lane = laneEndColumns.length
-        laneEndColumns[lane] = segment.endColumn
-        return {
-          event: segment.event,
-          startColumn: segment.startColumn,
-          endColumn: segment.endColumn,
-          startPosition: segment.startPosition,
-          endPosition: segment.endPosition,
-          lane,
-        }
       })
-      spansByWeek.set(week.getTime(), spans)
+
+      const allocateLanes = (items: typeof segments, laneOffset = 0) => {
+        const laneEndPositions: number[] = []
+        const assigned = [...items]
+          .sort((a, b) => a.startPosition - b.startPosition || a.endPosition - b.endPosition)
+          .map((segment) => {
+            let lane = laneEndPositions.findIndex((endPosition) => endPosition <= segment.startPosition)
+            if (lane < 0) lane = laneEndPositions.length
+            laneEndPositions[lane] = segment.endPosition
+            return {
+              event: segment.event,
+              startColumn: segment.startColumn,
+              endColumn: segment.endColumn,
+              startPosition: segment.startPosition,
+              endPosition: segment.endPosition,
+              lane: lane + laneOffset,
+            }
+          })
+        return { assigned, laneCount: laneEndPositions.length }
+      }
+
+      const allDaySpans = allocateLanes(segments.filter(({ event }) => event.allDay))
+      const allDayEventsByDay = new Map<number, Array<{ event: CalendarEvent; lane: number }>>()
+      let allDayLaneCount = allDaySpans.laneCount
+
+      for (let dayColumn = 1; dayColumn <= 7; dayColumn++) {
+        const day = addDays(week, dayColumn - 1)
+        const occupiedLanes = new Set(
+          allDaySpans.assigned
+            .filter((span) => span.startColumn <= dayColumn && span.endColumn > dayColumn)
+            .map((span) => span.lane),
+        )
+        const dayEvents = (eventsByDay.get(dateKey(day)) ?? [])
+          .filter((event) => event.allDay && !isMultiDaySpan(event))
+          .slice(0, 4)
+        const assigned = dayEvents.map((event) => {
+          let lane = 0
+          while (occupiedLanes.has(lane)) lane++
+          occupiedLanes.add(lane)
+          allDayLaneCount = Math.max(allDayLaneCount, lane + 1)
+          return { event, lane }
+        })
+        allDayEventsByDay.set(dayColumn, assigned)
+      }
+
+      const timedSpans = allocateLanes(
+        segments.filter(({ event }) => !event.allDay),
+        allDayLaneCount,
+      )
+      spansByWeek.set(week.getTime(), {
+        spans: [...allDaySpans.assigned, ...timedSpans.assigned],
+        allDayEventsByDay,
+        allDayLaneCount,
+      })
     }
 
     return spansByWeek
-  }, [events, selectedIds, weeks])
+  }, [events, eventsByDay, selectedIds, weeks])
+
+  const dayEventLanesByWeek = useMemo(() => {
+    const lanesByWeek = new Map<number, Map<number, Array<{ event: CalendarEvent; lane: number }>>>()
+
+    for (const week of weeks) {
+      const weekKey = week.getTime()
+      const weekLanes = multiDaySpansByWeek.get(weekKey)
+      const spans = weekLanes?.spans ?? []
+      const lanesByDay = new Map<number, Array<{ event: CalendarEvent; lane: number }>>()
+
+      for (let dayColumn = 1; dayColumn <= 7; dayColumn++) {
+        const day = addDays(week, dayColumn - 1)
+        const allDayEvents = weekLanes?.allDayEventsByDay.get(dayColumn) ?? []
+        const timedEvents = (eventsByDay.get(dateKey(day)) ?? [])
+          .filter((event) => !event.allDay && !isMultiDaySpan(event))
+          .slice(0, Math.max(0, 4 - allDayEvents.length))
+        const occupiedLanes = new Set(
+          spans
+            .filter((span) => span.startColumn <= dayColumn && span.endColumn > dayColumn)
+            .map((span) => span.lane),
+        )
+
+        const assignedTimedEvents = timedEvents.map((event) => {
+          let lane = weekLanes?.allDayLaneCount ?? 0
+          while (occupiedLanes.has(lane)) lane++
+          occupiedLanes.add(lane)
+          return { event, lane }
+        })
+        lanesByDay.set(dayColumn, [...allDayEvents, ...assignedTimedEvents])
+      }
+
+      lanesByWeek.set(weekKey, lanesByDay)
+    }
+
+    return lanesByWeek
+  }, [eventsByDay, multiDaySpansByWeek, weeks])
 
   async function connectGoogle() {
     setError('')
@@ -960,6 +1039,16 @@ function App() {
               {loadingEvents ? <LoaderCircle className="spin" size={18} /> : <RefreshCw size={18} />}
             </button>
             <button className="button button-outline today-button" onClick={scrollToToday}>Today</button>
+            <button
+              className="button button-outline"
+              type="button"
+              onClick={() => {
+                setNoteText('')
+                setNoteOpen(true)
+              }}
+            >
+              Note
+            </button>
             <div className="calendar-picker-wrap">
               <button
                 className="icon-button settings-menu-button"
@@ -1040,7 +1129,8 @@ function App() {
           <div className="scroll-sentinel" ref={topSentinelRef} />
           {weeks.map((week) => {
             const weekKey = week.getTime()
-            const multiDaySpans = multiDaySpansByWeek.get(weekKey) ?? []
+            const multiDaySpans = multiDaySpansByWeek.get(weekKey)?.spans ?? []
+            const dayEventLanes = dayEventLanesByWeek.get(weekKey)
             return (
               <section className="week-row" key={weekKey} ref={(element) => {
                 if (element) rowRefs.current.set(weekKey, element)
@@ -1053,10 +1143,10 @@ function App() {
                     (count, span) => span.startColumn <= dayColumn && span.endColumn > dayColumn
                       ? Math.max(count, span.lane + 1)
                       : count,
-                    0,
+                    Math.max(0, ...(dayEventLanes?.get(dayColumn) ?? []).map(({ lane }) => lane + 1)),
                   )
                   const dayEvents = eventsByDay.get(dateKey(day)) ?? []
-                  const visibleDayEvents = dayEvents.filter((event) => !isMultiDaySpan(event))
+                  const visibleDayEvents = dayEventLanes?.get(dayColumn) ?? []
                   const today = dateKey(day) === dateKey(new Date())
                   const pastDay = dateKey(day) < dateKey(new Date())
                   const outsideMonth = day.getMonth() !== visibleMonth.getMonth() || day.getFullYear() !== visibleMonth.getFullYear()
@@ -1091,13 +1181,16 @@ function App() {
                           <span>Moving event</span>
                         </div>
                       )}
-                      <div className="day-events" style={{ marginTop: `calc(${dayLaneCount} * var(--all-day-lane-height))` }}>
-                        {visibleDayEvents.slice(0, 4).map((event) => (
+                      <div
+                        className="day-events"
+                        style={{ gridTemplateRows: `repeat(${dayLaneCount}, var(--all-day-lane-height))` }}
+                      >
+                        {visibleDayEvents.map(({ event, lane }) => (
                           <div
                             className={`event ${connected ? 'is-draggable' : ''} ${eventDrag?.eventId === event.id ? 'is-dragging' : ''}`}
                             key={event.id}
                             title={`${event.title}${event.allDay ? '' : ` · ${formatTime(event.start)}`}`}
-                            style={{ backgroundColor: event.color, color: eventTextColor(event.color) }}
+                            style={{ backgroundColor: event.color, color: eventTextColor(event.color), gridRow: lane + 1 }}
                             role="button"
                             tabIndex={0}
                             onClick={(clickEvent) => {
@@ -1124,7 +1217,7 @@ function App() {
                             <span className="event-title">{event.title}</span>
                           </div>
                         ))}
-                        {visibleDayEvents.length > 4 && (
+                        {dayEvents.filter((event) => !isMultiDaySpan(event)).length > visibleDayEvents.length && (
                           <span className="more-events" onClick={(clickEvent) => clickEvent.stopPropagation()}>
                             +{visibleDayEvents.length - 4} more
                           </span>
@@ -1135,7 +1228,7 @@ function App() {
                 })}
                 {multiDaySpans.map(({ event, startColumn, endColumn, startPosition, endPosition, lane }) => (
                   <div
-                    className={`event multi-day-span ${event.allDay ? 'all-day-span' : 'timed-span'}`}
+                    className={`event multi-day-span ${event.allDay ? 'all-day-span' : 'timed-span'} ${dayNumber(eventDateKey(event.start)) < dayNumber(dateKey(week)) ? 'continues-from-previous-week' : ''} ${eventEndExclusiveDay(event) > dayNumber(dateKey(week)) + 7 ? 'continues-into-next-week' : ''}`}
                     key={event.id}
                     title={`${event.title}${event.allDay ? '' : ` · ${formatTime(event.start)}–${formatTime(event.end)}`}`}
                     role="button"
@@ -1354,6 +1447,47 @@ function App() {
           <span className="event-dot" style={{ backgroundColor: draggedEvent.color }} />
           {!draggedEvent.allDay && <span className="event-time">{formatTime(draggedEvent.start)}</span>}
           <span className="event-title">{draggedEvent.title}</span>
+        </div>
+      )}
+
+      {noteOpen && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setNoteText('')
+              setNoteOpen(false)
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              setNoteText('')
+              setNoteOpen(false)
+            }
+          }}
+        >
+          <section className="note-dialog" role="dialog" aria-modal="true" aria-labelledby="note-title">
+            <h2 id="note-title">Note</h2>
+            <textarea
+              className="note-textarea"
+              aria-label="Write a note for others to see"
+              value={noteText}
+              onChange={(event) => setNoteText(event.target.value)}
+              autoFocus
+            />
+            <div className="dialog-actions">
+              <button
+                className="button button-dark"
+                type="button"
+                onClick={() => {
+                  setNoteText('')
+                  setNoteOpen(false)
+                }}
+              >
+                Dismiss
+              </button>
+            </div>
+          </section>
         </div>
       )}
 

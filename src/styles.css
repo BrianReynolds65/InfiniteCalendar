@@ -125,6 +125,7 @@ button {
 }
 
 .calendar-toolbar {
+  container-type: inline-size;
   min-height: 76px;
   display: flex;
   align-items: center;
@@ -134,24 +135,26 @@ button {
 
 .month-navigation {
   flex: 1;
+  min-width: 0;
   gap: 18px;
 }
 
 .today-date {
   flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: clamp(4px, 0.8cqi, 10px);
   color: #68746d;
-  font-size: 33px;
+  font-size: clamp(11px, 2.2cqi, 33px);
   text-align: center;
   white-space: nowrap;
 }
 
 .today-date time {
-  /* font-size: 0.55em; */
-  font-variant-numeric: tabular-nums;
+  font-family: inherit;
+  font-weight: inherit;
 }
 
 .month-navigation h1 {
@@ -186,6 +189,7 @@ button {
 
 .toolbar-actions {
   flex: 1;
+  min-width: 0;
   gap: 9px;
   justify-content: flex-end;
 }
@@ -531,9 +535,8 @@ button {
 }
 
 .day-events {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  display: grid;
+  grid-auto-rows: var(--all-day-lane-height);
 }
 
 .event {
@@ -596,6 +599,16 @@ button {
   position: absolute;
   z-index: 1;
   height: var(--all-day-event-height);
+}
+
+.multi-day-span.continues-from-previous-week {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.multi-day-span.continues-into-next-week {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
 .event-dot {
@@ -695,6 +708,46 @@ button {
   background: #fff;
   box-shadow: 0 24px 80px #14231c35;
   animation: dialog-in .2s ease-out;
+}
+
+.note-dialog {
+  width: 80vw;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+  padding: clamp(16px, 3vw, 32px);
+  border: 1px solid #e4e9e4;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 24px 80px #14231c35;
+  animation: dialog-in .2s ease-out;
+}
+
+.note-dialog h2 {
+  margin: 0 0 16px;
+  font-family: 'Helvetica', Georgia, serif;
+  font-size: 28px;
+  font-weight: 500;
+}
+
+.note-textarea {
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  resize: none;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: clamp(72px, 6vw, 96px);
+  line-height: 1.5;
+}
+
+.note-textarea:focus {
+  outline: 2px solid #16866a55;
+  border-color: var(--green);
 }
 
 .event-editor-dialog {
@@ -894,7 +947,6 @@ button {
   }
 
   .today-date {
-    font-size: 11px;
     gap: 6px;
   }
 
@@ -1355,7 +1407,7 @@ button {
   overflow: hidden;
   margin: 0;
   color: #56645b;
-  font-size: 11px;
+  font-size: 24px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;

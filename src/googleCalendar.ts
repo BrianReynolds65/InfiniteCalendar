@@ -48,6 +48,12 @@ export type CalendarEventInput = {
   allDay: boolean
 }
 
+export type SharedNote = {
+  isOpen: boolean
+  text: string
+  version: number
+}
+
 async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...options,
@@ -82,6 +88,26 @@ export function startGoogleSignIn(): void {
 
 export function logoutGoogle(): Promise<void> {
   return apiRequest<void>('/auth/logout', { method: 'POST' })
+}
+
+export function getSharedNote(): Promise<SharedNote> {
+  return apiRequest<SharedNote>('/api/shared-note', { cache: 'no-store' })
+}
+
+export function openSharedNote(): Promise<SharedNote> {
+  return apiRequest<SharedNote>('/api/shared-note/open', { method: 'POST' })
+}
+
+export function saveSharedNoteText(text: string, expectedVersion: number): Promise<SharedNote> {
+  return apiRequest<SharedNote>('/api/shared-note', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, expectedVersion }),
+  })
+}
+
+export function dismissSharedNote(): Promise<SharedNote> {
+  return apiRequest<SharedNote>('/api/shared-note/dismiss', { method: 'POST' })
 }
 
 export function listGoogleCalendars(): Promise<GoogleCalendar[]> {

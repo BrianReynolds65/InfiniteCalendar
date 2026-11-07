@@ -1,6 +1,32 @@
 @baseUrl = http://localhost:5080
+@frontendOrigin = http://localhost:5173
 @sessionCookie = REPLACE_WITH_DAYBOOK_SESSION_COOKIE
 @taskListId = REPLACE_WITH_GOOGLE_TASK_LIST_ID
+
+### Read shared note state
+GET {{baseUrl}}/api/shared-note
+Cookie: Daybook.Session={{sessionCookie}}
+
+### Open the shared note on all connected devices
+POST {{baseUrl}}/api/shared-note/open
+Cookie: Daybook.Session={{sessionCookie}}
+Origin: {{frontendOrigin}}
+
+### Save shared note text
+PUT {{baseUrl}}/api/shared-note
+Cookie: Daybook.Session={{sessionCookie}}
+Origin: {{frontendOrigin}}
+Content-Type: application/json
+
+{
+  "text": "Remember to check the noticeboard",
+  "expectedVersion": 1
+}
+
+### Dismiss and clear the shared note on all connected devices
+POST {{baseUrl}}/api/shared-note/dismiss
+Cookie: Daybook.Session={{sessionCookie}}
+Origin: {{frontendOrigin}}
 
 ### List Google task lists
 GET {{baseUrl}}/api/tasklists

@@ -42,7 +42,7 @@ Google may expire refresh tokens after seven days when an External OAuth app rem
 
 ## Sessions and initial deployment
 
-The backend stores Google refresh tokens, calendar selections, and task-list selections encrypted with ASP.NET Core Data Protection. A persistent, HTTP-only browser cookie keeps selections associated with the browser independently of the Google authorization session, so they are restored after backend restarts and Google reauthorization. Disconnecting explicitly clears the session and its saved selections. The backend's data directory defaults to `%LOCALAPPDATA%\InfiniteCalendar` on Windows (or the operating system's local application-data directory), containing both the encrypted sessions and Data Protection keys. Restrict access to this directory and preserve it across backend restarts, or users will need to connect again.
+The backend stores Google refresh tokens, calendar selections, and task-list selections encrypted with ASP.NET Core Data Protection. The shared Note text and its open/closed state are also encrypted and saved in the backend data directory. Connected devices synchronize the Note every 1.5 seconds; opening it displays the same note on all connected devices, and dismissing it closes and clears it everywhere. The Note is available to signed-in users and remains available across backend restarts until dismissed. A persistent, HTTP-only browser cookie keeps selections associated with the browser independently of the Google authorization session, so they are restored after backend restarts and Google reauthorization. Disconnecting explicitly clears the session and its saved selections. The backend's data directory defaults to `%LOCALAPPDATA%\InfiniteCalendar` on Windows (or the operating system's local application-data directory), containing encrypted sessions, shared Note state, and Data Protection keys. Restrict access to this directory and preserve it across backend restarts, or users will need to connect again.
 
 For production, serve the app and backend over HTTPS, set `Google:FrontendOrigin` to the public app origin, register that origin's `/auth/callback` URL as the OAuth redirect URI, and use a persistent, access-controlled data directory. Protect the Data Protection key ring with a production key-management service before deploying to shared or untrusted infrastructure.
 
@@ -175,7 +175,8 @@ Now, on the destination server, copy the files to their proper destination. This
 sudo cp -a ~/infinitecalendar-upload/. /opt/infinitecalendar/
 ```
 The UI is served directly out of /opt/infinitecalendar/dist by the reverse proxy.
-To build and run the backend, just execute the following command on the server:
+To build and run the backend, just execute the following commands on the server:
 ```sh
+cd /opt/infinitecalendar
 docker compose up -d --build api
 ```

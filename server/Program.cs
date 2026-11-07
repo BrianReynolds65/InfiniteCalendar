@@ -24,6 +24,9 @@ builder.Services.AddSingleton(new GoogleOAuthSettings(
     (builder.Configuration["Google:FrontendOrigin"] ?? "http://localhost:5173").TrimEnd('/'),
     Path.Combine(dataDirectory, "sessions")));
 builder.Services.AddSingleton<GoogleTokenStore>();
+builder.Services.AddSingleton<ISharedNoteStore>(services => new SharedNoteStore(
+    services.GetRequiredService<IDataProtectionProvider>(),
+    Path.Combine(dataDirectory, "shared-note.protected")));
 builder.Services.AddHttpClient<GoogleCalendarApi>();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
@@ -69,6 +72,10 @@ string GetSettingsId(HttpContext context, string sessionId)
     });
     return settingsId;
 }
+
+bool HasTrustedOrigin(HttpContext context) =>
+    Uri.TryCreate(context.Request.Headers.Origin, UriKind.Absolute, out var origin)
+    && string.Equals(origin.GetLeftPart(UriPartial.Authority), oauth.FrontendOrigin, StringComparison.OrdinalIgnoreCase);
 
 app.Use(async (context, next) =>
 {
@@ -217,6 +224,63 @@ app.MapGet("/api/session", async (ClaimsPrincipal user, GoogleCalendarApi calend
     await calendarApi.EnsureSessionAsync(sessionId);
     return Results.Ok(new { connected = true });
 }).RequireAuthorization();
+
+app.MapGet("/api/shared-note", async (
+    ISharedNoteStore noteStore,
+    CancellationToken cancellationToken) =>
+    Results.Ok(await noteStore.GetAsync(cancellationToken)))
+    .WithName("GetSharedNote")
+    .WithSummary("Get the shared note")
+    .WithDescription("Returns the shared note text and whether its dialog is open.")
+    .RequireAuthorization();
+
+app.MapPost("/api/shared-note/open", async (
+    HttpContext context,
+    ISharedNoteStore noteStore,
+    CancellationToken cancellationToken) =>
+{
+    if (!HasTrustedOrigin(context))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+    return Results.Ok(await noteStore.OpenAsync(cancellationToken));
+})
+    .WithName("OpenSharedNote")
+    .WithSummary("Open the shared note")
+    .WithDescription("Opens the shared note for all connected devices, creating a blank note if needed.")
+    .RequireAuthorization();
+
+app.MapPut("/api/shared-note", async (
+    HttpContext context,
+    ISharedNoteStore noteStore,
+    SaveSharedNoteTextRequest request,
+    CancellationToken cancellationToken) =>
+{
+    if (!HasTrustedOrigin(context))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+    if (request.Text is null || request.Text.Length > SharedNoteStore.MaximumTextLength)
+        return Results.BadRequest(new { error = $"The note must be no more than {SharedNoteStore.MaximumTextLength} characters." });
+    if (request.ExpectedVersion < 0)
+        return Results.BadRequest(new { error = "The note version is invalid." });
+
+    return Results.Ok(await noteStore.SaveTextAsync(request, cancellationToken));
+})
+    .WithName("SaveSharedNote")
+    .WithSummary("Save shared note text")
+    .WithDescription("Saves note text only if no other device has changed or dismissed the note.")
+    .RequireAuthorization();
+
+app.MapPost("/api/shared-note/dismiss", async (
+    HttpContext context,
+    ISharedNoteStore noteStore,
+    CancellationToken cancellationToken) =>
+{
+    if (!HasTrustedOrigin(context))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+    return Results.Ok(await noteStore.DismissAsync(cancellationToken));
+})
+    .WithName("DismissSharedNote")
+    .WithSummary("Dismiss the shared note")
+    .WithDescription("Closes the shared note and clears its text for all connected devices.")
+    .RequireAuthorization();
 
 app.MapGet("/api/calendars", async (ClaimsPrincipal user, GoogleCalendarApi calendarApi) =>
 {

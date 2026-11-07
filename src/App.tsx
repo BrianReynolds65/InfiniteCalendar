@@ -19,7 +19,10 @@ import {
   getCalendarSelection,
   getTaskListSelection,
   getGoogleSession,
+  getSharedNote,
+  openSharedNote as openSharedNoteRequest,
   deleteCalendarEvent,
+  dismissSharedNote as dismissSharedNoteRequest,
   listCalendarEvents,
   listGoogleTaskLists,
   listGoogleTasks,
@@ -27,12 +30,14 @@ import {
   logoutGoogle,
   saveCalendarEvent,
   saveCalendarSelection,
+  saveSharedNoteText,
   saveGoogleTask,
   saveTaskListSelection,
   setGoogleTaskCompleted,
   startGoogleSignIn,
   type CalendarEvent,
   type CalendarEventInput,
+  type SharedNote,
   type GoogleCalendar,
   type GoogleTask,
   type GoogleTaskList,
@@ -42,6 +47,8 @@ import {
 const WEEKS_PER_EXTENSION = 8
 const EVENT_POLL_INTERVAL_MS = 60_000
 const INACTIVITY_RESET_DELAY_MS = 5 * 60_000
+const SHARED_NOTE_POLL_INTERVAL_MS = 1_500
+const MAX_SHARED_NOTE_LENGTH = 50_000
 
 function startOfWeek(date: Date): Date {
   const result = new Date(date.getFullYear(), date.getMonth(), date.getDate())
@@ -205,8 +212,8 @@ function App() {
   const [updatingTaskIds, setUpdatingTaskIds] = useState<string[]>([])
   const [connected, setConnected] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [noteOpen, setNoteOpen] = useState(false)
-  const [noteText, setNoteText] = useState('')
+  const [sharedNote, setSharedNote] = useState<SharedNote>({ isOpen: false, text: '', version: 0 })
+  const [noteError, setNoteError] = useState('')
   const [eventDraft, setEventDraft] = useState<EventDraft | null>(null)
   const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false)
   const [eventDrag, setEventDrag] = useState<EventDragState | null>(null)
@@ -230,11 +237,62 @@ function App() {
   const pendingPrepend = useRef(false)
   const selectionSaveRef = useRef<Promise<void>>(Promise.resolve())
   const taskSelectionSaveRef = useRef<Promise<void>>(Promise.resolve())
+  const sharedNoteRef = useRef<SharedNote>({ isOpen: false, text: '', version: 0 })
+  const noteSaveTimeoutRef = useRef<number | null>(null)
+  const noteSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
+
+  function applySharedNote(note: SharedNote) {
+    if (note.version <= sharedNoteRef.current.version) return
+    sharedNoteRef.current = note
+    setSharedNote(note)
+  }
 
   useEffect(() => {
     const interval = window.setInterval(() => setNow(new Date()), 60_000)
     return () => window.clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    if (!connected) {
+      sharedNoteRef.current = { isOpen: false, text: '', version: -1 }
+      setSharedNote(sharedNoteRef.current)
+      setNoteError('')
+      return
+    }
+
+    let cancelled = false
+    let requestInProgress = false
+    const syncSharedNote = async () => {
+      if (requestInProgress) return
+      requestInProgress = true
+      try {
+        const note = await getSharedNote()
+        if (cancelled) return
+        applySharedNote(note)
+        setNoteError('')
+      } catch (syncError: unknown) {
+        if (!cancelled) {
+          setNoteError(syncError instanceof Error ? syncError.message : 'Could not synchronize the shared note.')
+        }
+      } finally {
+        requestInProgress = false
+      }
+    }
+
+    void syncSharedNote()
+    const interval = window.setInterval(() => void syncSharedNote(), SHARED_NOTE_POLL_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [connected])
+
+  useEffect(() => {
+    if (!sharedNote.isOpen && noteSaveTimeoutRef.current !== null) {
+      window.clearTimeout(noteSaveTimeoutRef.current)
+      noteSaveTimeoutRef.current = null
+    }
+  }, [sharedNote.isOpen])
 
   useEffect(() => {
     let timeout = window.setTimeout(scrollToToday, INACTIVITY_RESET_DELAY_MS)
@@ -986,6 +1044,59 @@ function App() {
     if (row && scrollRef.current) scrollRef.current.scrollTo({ top: row.offsetTop, behavior: 'smooth' })
   }
 
+  async function showSharedNote() {
+    setError('')
+    setNoteError('')
+    try {
+      applySharedNote(await openSharedNoteRequest())
+    } catch (openError: unknown) {
+      setError(openError instanceof Error ? openError.message : 'Could not open the shared note.')
+    }
+  }
+
+  function queueSharedNoteTextSave(text: string) {
+    const save = noteSaveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const note = await saveSharedNoteText(text, sharedNoteRef.current.version)
+        applySharedNote(note)
+        setNoteError('')
+      })
+      .catch((saveError: unknown) => {
+        setNoteError(saveError instanceof Error ? saveError.message : 'Could not save the shared note.')
+      })
+    noteSaveQueueRef.current = save
+  }
+
+  function changeSharedNoteText(text: string) {
+    const updated = { ...sharedNoteRef.current, text }
+    sharedNoteRef.current = updated
+    setSharedNote(updated)
+    setNoteError('')
+    if (noteSaveTimeoutRef.current !== null) window.clearTimeout(noteSaveTimeoutRef.current)
+    noteSaveTimeoutRef.current = window.setTimeout(() => {
+      noteSaveTimeoutRef.current = null
+      queueSharedNoteTextSave(text)
+    }, 250)
+  }
+
+  function closeSharedNote() {
+    if (noteSaveTimeoutRef.current !== null) {
+      window.clearTimeout(noteSaveTimeoutRef.current)
+      noteSaveTimeoutRef.current = null
+    }
+    setNoteError('')
+    const dismiss = noteSaveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        applySharedNote(await dismissSharedNoteRequest())
+      })
+      .catch((dismissError: unknown) => {
+        setError(dismissError instanceof Error ? dismissError.message : 'Could not dismiss the shared note.')
+      })
+    noteSaveQueueRef.current = dismiss
+  }
+
   function moveMonth(direction: number) {
     const destination = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + direction, 1)
     setVisibleMonth(destination)
@@ -1042,10 +1153,9 @@ function App() {
             <button
               className="button button-outline"
               type="button"
-              onClick={() => {
-                setNoteText('')
-                setNoteOpen(true)
-              }}
+              onClick={() => void showSharedNote()}
+              disabled={!connected}
+              title={connected ? 'Open shared note' : 'Connect Google to use the shared note'}
             >
               Note
             </button>
@@ -1452,39 +1562,32 @@ function App() {
         </div>
       )}
 
-      {noteOpen && (
+      {sharedNote.isOpen && (
         <div
           className="modal-backdrop"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              setNoteText('')
-              setNoteOpen(false)
-            }
+            if (event.target === event.currentTarget) closeSharedNote()
           }}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') {
-              setNoteText('')
-              setNoteOpen(false)
-            }
+            if (event.key === 'Escape') closeSharedNote()
           }}
         >
           <section className="note-dialog" role="dialog" aria-modal="true" aria-labelledby="note-title">
             <h2 id="note-title">Note</h2>
+            {noteError && <p className="dialog-error" role="alert">{noteError}</p>}
             <textarea
               className="note-textarea"
               aria-label="Write a note for others to see"
-              value={noteText}
-              onChange={(event) => setNoteText(event.target.value)}
+              value={sharedNote.text}
+              onChange={(event) => changeSharedNoteText(event.target.value)}
+              maxLength={MAX_SHARED_NOTE_LENGTH}
               autoFocus
             />
             <div className="dialog-actions">
               <button
                 className="button button-dark"
                 type="button"
-                onClick={() => {
-                  setNoteText('')
-                  setNoteOpen(false)
-                }}
+                onClick={closeSharedNote}
               >
                 Dismiss
               </button>

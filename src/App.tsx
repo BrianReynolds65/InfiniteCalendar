@@ -1115,6 +1115,8 @@ function App() {
                   <button className="menu-settings" type="button" onClick={() => { setSettingsMenuOpen(false); setSettingsOpen(true) }}>
                     <CircleHelp size={15} /> Google setup help
                   </button>
+                  <a className="menu-settings menu-settings-link" href="/privacy.html">Privacy policy</a>
+                  <a className="menu-settings menu-settings-link" href="/terms.html">Terms of use</a>
                 </div>
               )}
             </div>

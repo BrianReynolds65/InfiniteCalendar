@@ -49,6 +49,12 @@ const EVENT_POLL_INTERVAL_MS = 60_000
 const INACTIVITY_RESET_DELAY_MS = 5 * 60_000
 const SHARED_NOTE_POLL_INTERVAL_MS = 1_500
 const MAX_SHARED_NOTE_LENGTH = 50_000
+const TASK_LAYOUT_STORAGE_KEY = 'infinite-calendar.task-layout'
+type TaskLayout = 'bottom' | 'right'
+
+function getInitialTaskLayout(): TaskLayout {
+  return window.localStorage.getItem(TASK_LAYOUT_STORAGE_KEY) === 'right' ? 'right' : 'bottom'
+}
 
 function startOfWeek(date: Date): Date {
   const result = new Date(date.getFullYear(), date.getMonth(), date.getDate())
@@ -196,6 +202,7 @@ function dayKeyAtPoint(x: number, y: number): string | undefined {
 }
 
 function App() {
+  const [taskLayout, setTaskLayout] = useState<TaskLayout>(getInitialTaskLayout)
   const [now, setNow] = useState(() => new Date())
   const [weeks, setWeeks] = useState<Date[]>(() => {
     const monday = startOfWeek(new Date())
@@ -230,6 +237,8 @@ function App() {
   const [error, setError] = useState('')
   const [visibleMonth, setVisibleMonth] = useState(() => new Date())
   const scrollRef = useRef<HTMLDivElement>(null)
+  const taskTitleInputRef = useRef<HTMLInputElement>(null)
+  const eventTitleInputRef = useRef<HTMLInputElement>(null)
   const rowRefs = useRef(new Map<number, HTMLElement>())
   const topSentinelRef = useRef<HTMLDivElement>(null)
   const bottomSentinelRef = useRef<HTMLDivElement>(null)
@@ -240,6 +249,14 @@ function App() {
   const sharedNoteRef = useRef<SharedNote>({ isOpen: false, text: '', version: 0 })
   const noteSaveTimeoutRef = useRef<number | null>(null)
   const noteSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
+
+  useLayoutEffect(() => {
+    if (taskDraft) taskTitleInputRef.current?.focus({ preventScroll: true })
+  }, [taskDraft !== null])
+
+  useLayoutEffect(() => {
+    if (eventDraft) eventTitleInputRef.current?.focus({ preventScroll: true })
+  }, [eventDraft !== null])
 
   function applySharedNote(note: SharedNote) {
     if (note.version <= sharedNoteRef.current.version) return
@@ -328,6 +345,10 @@ function App() {
   )
   const firstWeek = weeks[0]?.getTime() ?? 0
   const lastWeek = weeks[weeks.length - 1]?.getTime() ?? 0
+
+  useEffect(() => {
+    window.localStorage.setItem(TASK_LAYOUT_STORAGE_KEY, taskLayout)
+  }, [taskLayout])
 
   useEffect(() => {
     let cancelled = false
@@ -1124,7 +1145,7 @@ function App() {
     : undefined
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${taskLayout === 'right' ? 'tasks-right' : ''}`}>
       <section className="calendar-area" id="top">
         <div className="calendar-toolbar">
           <div className="month-navigation">
@@ -1186,6 +1207,29 @@ function App() {
                       Connect Google
                     </button>
                   )}
+                  <div className="menu-heading">Task layout</div>
+                  <button
+                    className="calendar-option"
+                    type="button"
+                    aria-pressed={taskLayout === 'bottom'}
+                    onClick={() => setTaskLayout('bottom')}
+                  >
+                    <span className="calendar-name">Bottom row</span>
+                    <span className={`checkmark ${taskLayout === 'bottom' ? 'checked' : ''}`}>
+                      {taskLayout === 'bottom' && <Check size={13} />}
+                    </span>
+                  </button>
+                  <button
+                    className="calendar-option"
+                    type="button"
+                    aria-pressed={taskLayout === 'right'}
+                    onClick={() => setTaskLayout('right')}
+                  >
+                    <span className="calendar-name">Right stack</span>
+                    <span className={`checkmark ${taskLayout === 'right' ? 'checked' : ''}`}>
+                      {taskLayout === 'right' && <Check size={13} />}
+                    </span>
+                  </button>
                   <div className="menu-heading settings-menu-heading">
                     Calendars <span className="selection-count">{selectedIds.length}</span>
                   </div>
@@ -1498,8 +1542,9 @@ function App() {
           >
             <div className="dialog-heading">
               <div>
-                <span className="eyebrow">{taskLists.find(({ id }) => id === taskDraft.taskListId)?.title ?? 'GOOGLE TASKS'}</span>
-                <h2 id="task-editor-title">{taskDraft.id ? 'Edit task' : 'New task'}</h2>
+                <h2 id="task-editor-title">
+                  {taskDraft.id ? 'Edit' : 'New'} {taskLists.find(({ id }) => id === taskDraft.taskListId)?.title ?? 'Task'} Item
+                </h2>
               </div>
               <button className="icon-button" type="button" onClick={() => setTaskDraft(null)} aria-label="Close task editor" disabled={savingTask}>
                 <X size={18} />
@@ -1512,9 +1557,9 @@ function App() {
               className="text-input"
               value={taskDraft.title}
               onChange={(changeEvent) => setTaskDraft((current) => current ? { ...current, title: changeEvent.target.value } : current)}
+              ref={taskTitleInputRef}
               maxLength={1024}
               required
-              autoFocus
             />
             <label className="field-label task-notes-label" htmlFor="task-notes">Notes</label>
             <textarea
@@ -1659,9 +1704,9 @@ function App() {
               className="text-input"
               value={eventDraft.title}
               onChange={(changeEvent) => setEventDraft((current) => current ? { ...current, title: changeEvent.target.value } : current)}
+              ref={eventTitleInputRef}
               maxLength={500}
               required
-              autoFocus
             />
             <label className="field-label event-field-label" htmlFor="event-calendar">Calendar</label>
             <select
@@ -1682,17 +1727,19 @@ function App() {
               All-day event
             </label>
             <div className={`event-date-fields ${eventDraft.allDay ? '' : 'has-times'}`}>
-              <label className="field-label" htmlFor="event-start-date">Start date</label>
-              <input
-                id="event-start-date"
-                className="text-input"
-                type="date"
-                value={eventDraft.startDate}
-                required
-                onChange={(changeEvent) => setEventDraft((current) => current ? { ...current, startDate: changeEvent.target.value } : current)}
-              />
+              <div className="event-date-group">
+                <label className="field-label" htmlFor="event-start-date">Start date</label>
+                <input
+                  id="event-start-date"
+                  className="text-input"
+                  type="date"
+                  value={eventDraft.startDate}
+                  required
+                  onChange={(changeEvent) => setEventDraft((current) => current ? { ...current, startDate: changeEvent.target.value } : current)}
+                />
+              </div>
               {!eventDraft.allDay && (
-                <>
+                <div className="event-date-group">
                   <label className="field-label" htmlFor="event-start-time">Start time</label>
                   <input
                     id="event-start-time"
@@ -1702,19 +1749,21 @@ function App() {
                     required
                     onChange={(changeEvent) => setEventDraft((current) => current ? { ...current, startTime: changeEvent.target.value } : current)}
                   />
-                </>
+                </div>
               )}
-              <label className="field-label" htmlFor="event-end-date">{eventDraft.allDay ? 'End date (inclusive)' : 'End date'}</label>
-              <input
-                id="event-end-date"
-                className="text-input"
-                type="date"
-                value={eventDraft.endDate}
-                required
-                onChange={(changeEvent) => setEventDraft((current) => current ? { ...current, endDate: changeEvent.target.value } : current)}
-              />
+              <div className="event-date-group">
+                <label className="field-label" htmlFor="event-end-date">{eventDraft.allDay ? 'End date (inclusive)' : 'End date'}</label>
+                <input
+                  id="event-end-date"
+                  className="text-input"
+                  type="date"
+                  value={eventDraft.endDate}
+                  required
+                  onChange={(changeEvent) => setEventDraft((current) => current ? { ...current, endDate: changeEvent.target.value } : current)}
+                />
+              </div>
               {!eventDraft.allDay && (
-                <>
+                <div className="event-date-group">
                   <label className="field-label" htmlFor="event-end-time">End time</label>
                   <input
                     id="event-end-time"
@@ -1724,7 +1773,7 @@ function App() {
                     required
                     onChange={(changeEvent) => setEventDraft((current) => current ? { ...current, endTime: changeEvent.target.value } : current)}
                   />
-                </>
+                </div>
               )}
             </div>
             <div className="dialog-actions">

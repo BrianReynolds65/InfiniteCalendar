@@ -38,7 +38,7 @@ button {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 0 48px 32px;
+  padding: 0 20px 32px;
 }
 
 .toolbar-actions,
@@ -116,7 +116,6 @@ button {
 
 .calendar-area {
   width: 100%;
-  max-width: 1480px;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -913,8 +912,8 @@ button {
 
 @media (min-width: 1600px) {
   .app-shell {
-    padding-right: 64px;
-    padding-left: 64px;
+    padding-right: 20px;
+    padding-left: 20px;
   }
 
   .week-row {
@@ -1320,6 +1319,7 @@ button {
 
 .calendar-area {
   flex: 1 1 0;
+  max-width: none;
 }
 
 .tasks-panel {
@@ -1329,7 +1329,7 @@ button {
   flex: 0 0 20%;
   flex-direction: column;
   min-height: 100px;
-  max-width: 1480px;
+  max-width: none;
   width: 100%;
   margin: 0 auto;
   border-top: 1px solid var(--line);

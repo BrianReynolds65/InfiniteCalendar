@@ -1708,16 +1708,6 @@ function App() {
               maxLength={500}
               required
             />
-            <label className="field-label event-field-label" htmlFor="event-calendar">Calendar</label>
-            <select
-              id="event-calendar"
-              className="text-input"
-              value={eventDraft.calendarId}
-              disabled={Boolean(eventDraft.id)}
-              onChange={(changeEvent) => setEventDraft((current) => current ? { ...current, calendarId: changeEvent.target.value } : current)}
-            >
-              {selectedCalendars.map((calendar) => <option key={calendar.id} value={calendar.id}>{calendar.summary}</option>)}
-            </select>
             <label className="all-day-toggle">
               <input
                 type="checkbox"
@@ -1776,12 +1766,24 @@ function App() {
                 </div>
               )}
             </div>
-            <div className="dialog-actions">
+            <div className="dialog-actions event-dialog-actions">
               {eventDraft.id && (
                 <button className="button button-danger" type="button" onClick={() => { setError(''); setDeleteConfirmationOpen(true) }} disabled={savingEvent}>
                   <Trash2 size={16} /> Delete
                 </button>
               )}
+              <div className="event-calendar-action">
+                <label className="field-label" htmlFor="event-calendar">Calendar</label>
+                <select
+                  id="event-calendar"
+                  className="text-input"
+                  value={eventDraft.calendarId}
+                  disabled={Boolean(eventDraft.id)}
+                  onChange={(changeEvent) => setEventDraft((current) => current ? { ...current, calendarId: changeEvent.target.value } : current)}
+                >
+                  {selectedCalendars.map((calendar) => <option key={calendar.id} value={calendar.id}>{calendar.summary}</option>)}
+                </select>
+              </div>
               <button className="button button-outline" type="button" onClick={() => setEventDraft(null)} disabled={savingEvent}>Cancel</button>
               <button className="button button-dark" type="submit" disabled={savingEvent}>
                 {savingEvent ? <LoaderCircle className="spin" size={16} /> : <CalendarDays size={16} />}

@@ -921,6 +921,33 @@ button {
   margin-top: 24px;
 }
 
+.event-dialog-actions {
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.event-calendar-action {
+  display: flex;
+  flex: 1 1 140px;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  max-width: 220px;
+  margin-right: auto;
+}
+
+.event-calendar-action .field-label {
+  margin: 0;
+}
+
+.event-calendar-action .text-input {
+  height: 38px;
+  overflow: hidden;
+  padding-right: 28px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }
